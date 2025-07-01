@@ -1,0 +1,80 @@
+use chunkee_core::{
+    block::{Block, BlockTypeId, ChunkeeVoxel, TextureMapping},
+    block_mesh::{Voxel, VoxelVisibility},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MyVoxels {
+    Air = 0,
+    Grass,
+    Dirt,
+    Stone,
+    Snow,
+}
+
+impl From<MyVoxels> for BlockTypeId {
+    fn from(voxel: MyVoxels) -> Self {
+        voxel as BlockTypeId
+    }
+}
+
+impl From<BlockTypeId> for MyVoxels {
+    fn from(id: BlockTypeId) -> Self {
+        match id {
+            0 => MyVoxels::Air,
+            1 => MyVoxels::Grass,
+            2 => MyVoxels::Dirt,
+            3 => MyVoxels::Stone,
+            4 => MyVoxels::Snow,
+            // Fallback
+            _ => MyVoxels::Air,
+        }
+    }
+}
+
+impl Default for MyVoxels {
+    fn default() -> Self {
+        MyVoxels::Air
+    }
+}
+
+impl Block for MyVoxels {
+    fn name(&self) -> &'static str {
+        match self {
+            MyVoxels::Air => "Air",
+            MyVoxels::Grass => "Grass",
+            MyVoxels::Dirt => "Dirt",
+            MyVoxels::Stone => "Stone",
+            MyVoxels::Snow => "Snow",
+        }
+    }
+
+    fn is_solid(&self) -> bool {
+        match self {
+            MyVoxels::Air => false,
+            _ => true,
+        }
+    }
+
+    fn texture_mapping(&self) -> TextureMapping {
+        match self {
+            MyVoxels::Grass => TextureMapping::All(0),
+            MyVoxels::Dirt => TextureMapping::All(1),
+            MyVoxels::Stone => TextureMapping::All(2),
+            MyVoxels::Snow => TextureMapping::All(3),
+            _ => TextureMapping::None,
+        }
+    }
+}
+
+impl Voxel for MyVoxels {
+    fn get_visibility(&self) -> VoxelVisibility {
+        match self {
+            MyVoxels::Air => VoxelVisibility::Empty,
+            _ => VoxelVisibility::Opaque,
+        }
+    }
+}
+
+impl ChunkeeVoxel for MyVoxels {}

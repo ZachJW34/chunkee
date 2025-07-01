@@ -1,0 +1,36 @@
+# Global ignores (common OS/filesystem junk)
+.DS_Store
+Thumbs.db
+
+# --- GODOT ---
+# Ignore Godot-specific build and user data
+godot/.import/
+godot/.godot/
+godot/export.cfg
+godot/export_presets.cfg
+godot/.mono/
+godot/debug_saves
+
+# Optional: ignore user-specific editor settings
+godot/editor_settings-*.tres
+
+# --- RUST ---
+# Cargo output and target directory
+target/
+
+# Rust-specific temporary files
+**/*.rs.bk
+
+# Optional: ignore IDE/editor settings (uncomment what you use)
+# .vscode/
+# .idea/
+# *.swp
+
+# --- TOOLING ---
+# Optional: node_modules or build artifacts if you mix tooling
+**/node_modules/
+**/dist/
+**/build/
+
+# logs
+log.*

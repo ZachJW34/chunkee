@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["chunkee-core", "godot/chunkee-godot"]
+
+[profile.dev]
+opt-level = 3
+debug = true

@@ -6,7 +6,7 @@ use std::{
     vec,
 };
 
-use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
 
 use crate::{
@@ -27,9 +27,7 @@ pub enum PipelineState {
     Generating,
     NeedsMesh,
     Meshing,
-    // PartialMeshing,
     MeshReady,
-    // PartialMeshReady,
     NeedsUnload,
     Unloading,
 }
@@ -88,14 +86,6 @@ pub enum PipelineResult {
     },
 }
 
-// #[derive(Debug)]
-// pub enum WorkItem {
-//     Load(ChunkVector),
-//     Generate(ChunkVector),
-//     Mesh(ChunkVector),
-//     Unload(ChunkVector),
-// }
-
 enum TaskResult {
     DeltasLoaded {
         cv: ChunkVector,
@@ -151,26 +141,29 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
         let mut streamer = ChunkStreamer::new();
         let mut camera_data: Option<CameraData> = None;
 
-        // let (w_sx, w_rx) = crossbeam_channel::unbounded::<WorkItem>();
         let (t_sx, t_rx) = crossbeam_channel::unbounded::<TaskResult>();
 
         let load_queue: Arc<WorkQueue> = Arc::new(Mutex::new(BinaryHeap::new()));
+        let load_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
         let generate_queue: Arc<WorkQueue> = Arc::new(Mutex::new(BinaryHeap::new()));
         let mesh_queue: Arc<WorkQueue> = Arc::new(Mutex::new(BinaryHeap::new()));
         let unload_queue: Arc<WorkQueue> = Arc::new(Mutex::new(BinaryHeap::new()));
 
         loop {
-            match message_receiver.try_recv() {
-                Ok(PipelineMessage::Shutdown) | Err(TryRecvError::Disconnected) => return,
-                Ok(PipelineMessage::CameraDataUpdate(cd)) => {
-                    camera_data.replace(cd);
+            for message in message_receiver.try_iter() {
+                match message {
+                    PipelineMessage::Shutdown => return,
+                    PipelineMessage::ChunkEdit(cv) => {
+                        let mut mesh_queue = mesh_queue.lock().unwrap();
+                        mesh_queue.push(PrioritizedWorkItem { priority: 0, cv });
+                    }
+                    PipelineMessage::CameraDataUpdate(cd) => {
+                        camera_data.replace(cd);
+                    }
                 }
-                Ok(PipelineMessage::ChunkEdit(cv)) => {
-                    let mut mesh_queue = mesh_queue.lock().unwrap();
-                    mesh_queue.push(PrioritizedWorkItem { priority: 0, cv });
-                    // w_sx.send(WorkItem::Mesh(cv)).ok();
-                }
-                Err(TryRecvError::Empty) => {}
             }
 
             if camera_data.is_none() {
@@ -184,7 +177,6 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                 camera_data,
                 radius,
                 &world_chunks,
-                // &w_sx,
                 &load_queue,
                 &unload_queue,
             );
@@ -204,7 +196,6 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                                 priority: calculate_chunk_priority(cv, camera_data),
                                 cv,
                             });
-                            // w_sx.send(WorkItem::Generate(cv)).ok();
                         }
                     }
                     TaskResult::GenerationComplete { cv, chunk } => {
@@ -222,7 +213,6 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                                 priority: calculate_chunk_priority(cv, camera_data),
                                 cv,
                             });
-                            // w_sx.send(WorkItem::Mesh(cv)).ok();
                         }
 
                         if should_notify_neighbors {
@@ -234,11 +224,8 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                                         PipelineState::Meshing | PipelineState::MeshReady
                                     )
                                 {
-                                    // neighbor.assign_neighbor(&face);
-
                                     neighbor.state = PipelineState::NeedsMesh;
                                     neighbors.push(neighbor_cv);
-                                    // w_sx.send(WorkItem::Mesh(neighbor_cv)).ok();
                                 }
                             }
                             for neighbor_cv in neighbors {
@@ -277,6 +264,8 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                 }
             }
 
+            // Consider only draining some "x" amount to allow culling of no longer needed io operations.
+            // There is already an early bail out, but it reduce the amount of time spent spawning threads with stale data
             while let Some(load_item) = load_queue.lock().unwrap().pop() {
                 let cv = load_item.cv;
                 if let Some(mut world_chunk) = world_chunks.get_mut(&cv)
@@ -286,7 +275,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
 
                     let t_sx = t_sx.clone();
                     let chunk_store = chunk_store.clone();
-                    rayon::spawn(move || {
+                    load_pool.spawn(move || {
                         let deltas = chunk_store.load_delta(cv);
                         t_sx.send(TaskResult::DeltasLoaded { cv, deltas }).ok();
                     });
@@ -365,92 +354,6 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                     }
                 }
             }
-
-            // for work_item in w_rx.try_iter() {
-            //     match work_item {
-            //         WorkItem::Load(cv) => {
-            //             if let Some(mut world_chunk) = world_chunks.get_mut(&cv)
-            //                 && world_chunk.state == PipelineState::NeedsLoad
-            //             {
-            //                 world_chunk.state = PipelineState::LoadingDeltas;
-
-            //                 let t_sx = t_sx.clone();
-            //                 let chunk_store = chunk_store.clone();
-            //                 rayon::spawn(move || {
-            //                     let deltas = chunk_store.load_delta(cv);
-            //                     t_sx.send(TaskResult::DeltasLoaded { cv, deltas }).ok();
-            //                 });
-            //             }
-            //         }
-            //         WorkItem::Generate(cv) => {
-            //             if let Some(mut world_chunk) = world_chunks.get_mut(&cv)
-            //                 && world_chunk.state == PipelineState::NeedsGeneration
-            //             {
-            //                 world_chunk.state = PipelineState::Generating;
-
-            //                 let t_sx = t_sx.clone();
-            //                 let generator = generator.clone();
-            //                 rayon::spawn(move || {
-            //                     let mut chunk = Chunk::default();
-            //                     generator.apply(cv_to_wv(cv), &mut chunk);
-            //                     t_sx.send(TaskResult::GenerationComplete { cv, chunk }).ok();
-            //                 });
-            //             }
-            //         }
-            //         WorkItem::Mesh(cv) => {
-            //             let chunk = if let Some(mut world_chunk) = world_chunks.get_mut(&cv)
-            //                 && world_chunk.state == PipelineState::NeedsMesh
-            //             {
-            //                 world_chunk.state = PipelineState::Meshing;
-
-            //                 world_chunk.chunk.clone()
-            //             } else {
-            //                 continue;
-            //             };
-
-            //             if chunk.is_empty() {
-            //                 let mesh = ChunkMeshData::default();
-            //                 t_sx.send(TaskResult::MeshComplete { cv, mesh: mesh }).ok();
-            //                 continue;
-            //             };
-
-            //             let neighbors = realize_neighbors(cv, &world_chunks);
-
-            //             if neighbors.iter().all(|n| n.is_some_and(|n| n.is_full())) {
-            //                 let mesh = ChunkMeshData::default();
-            //                 t_sx.send(TaskResult::MeshComplete { cv, mesh: mesh }).ok();
-            //                 continue;
-            //             }
-
-            //             let t_sx = t_sx.clone();
-            //             let chunk = Box::new(chunk);
-            //             rayon::spawn(move || {
-            //                 let mesh = mesh_chunk::<V>(cv, chunk, neighbors);
-            //                 t_sx.send(TaskResult::MeshComplete { cv, mesh }).ok();
-            //             });
-            //         }
-            //         WorkItem::Unload(cv) => {
-            //             if let Some(mut world_chunk) = world_chunks.get_mut(&cv)
-            //                 && world_chunk.state == PipelineState::NeedsUnload
-            //             {
-            //                 world_chunk.state = PipelineState::Unloading;
-            //                 let t_sx = t_sx.clone();
-
-            //                 if world_chunk.is_dirty {
-            //                     let chunk_store = chunk_store.clone();
-            //                     let deltas = world_chunk.deltas.clone();
-
-            //                     rayon::spawn(move || {
-            //                         chunk_store.save_delta(cv, &deltas);
-            //                         t_sx.send(TaskResult::UnloadComplete { cv }).ok();
-            //                     });
-            //                 } else {
-            //                     t_sx.send(TaskResult::UnloadComplete { cv }).ok();
-            //                 }
-            //             }
-            //         }
-            //     }
-            // }
 
             thread::sleep(std::time::Duration::from_millis(10));
         }

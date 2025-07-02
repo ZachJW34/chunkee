@@ -21,13 +21,19 @@ pub trait ToCameraData {
 impl ToCameraData for Gd<Camera3D> {
     fn to_camera_data(&self) -> CameraData {
         let pos = self.get_global_position().as_vec3();
-        let planes = self.get_frustum();
-        let frustum = Frustum {
-            planes: std::array::from_fn(|idx| Plane {
-                normal: planes.at(idx).normal.as_vec3(),
-                d: planes.at(idx).d,
-            }),
-        };
+        let planes_arr = self.get_frustum();
+        let planes = std::array::from_fn(|idx| {
+            let plane = planes_arr.at(idx).normalized();
+
+            Plane {
+                // Godot’s get_frustum returns planes with outward normals,
+                // Chunkee is expecting inward so we flip
+                normal: -plane.normal.as_vec3(),
+                d: plane.d,
+            }
+        });
+
+        let frustum = Frustum { planes };
 
         CameraData { pos, frustum }
     }

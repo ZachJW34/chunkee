@@ -1,6 +1,6 @@
-[gd_scene load_steps=12 format=3 uid="uid://cxj4062ca64qg"]
+[gd_scene load_steps=13 format=3 uid="uid://cxj4062ca64qg"]
 
-[ext_resource type="Script" uid="uid://hse8vptw6r6m" path="res://scripts/CameraController.gd" id="1_1bvp3"]
+[ext_resource type="Script" uid="uid://detcpral3kwk2" path="res://scripts/PlayerController.gd" id="1_7mycd"]
 [ext_resource type="Script" uid="uid://cdk4h6kxxjfqt" path="res://addons/sky_3d/src/Sky3D.gd" id="1_h2yge"]
 [ext_resource type="Script" uid="uid://bmlw0ecsxxk3o" path="res://addons/sky_3d/src/Skydome.gd" id="2_1bvp3"]
 [ext_resource type="Script" uid="uid://bln4txadkk3b1" path="res://addons/sky_3d/src/TimeOfDay.gd" id="3_lquwl"]
@@ -31,26 +31,24 @@ shader_parameter/texture_array = ExtResource("6_272bh")
 shader_parameter/atlas_columns = 4
 shader_parameter/ao_intensity = 0.5
 
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_7mycd"]
+
 [node name="Node3D" type="Node3D"]
-
-[node name="Player" type="Node3D" parent="."]
-script = ExtResource("1_1bvp3")
-
-[node name="Camera3D" type="Camera3D" parent="Player"]
 
 [node name="Sky3D" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_5vw27")
 camera_attributes = SubResource("CameraAttributesPractical_kek77")
 script = ExtResource("1_h2yge")
-current_time = 10.8534
+current_time = 12.3649
 minutes_per_day = 1217.8
 metadata/_custom_type_script = "uid://cdk4h6kxxjfqt"
 
 [node name="SunLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.971552, 0.236826, 0.640203, 0.181931, 0.746352, -0.768205, 0.151617, 0.621991, 0.236826, 0.746352, 0.621991)
+transform = Transform3D(0, -0.992286, -0.123973, 0.633045, -0.0959692, 0.768143, -0.774115, -0.0784804, 0.628162, -0.123973, 0.768143, 0.628162)
 shadow_enabled = true
 
 [node name="MoonLight" type="DirectionalLight3D" parent="Sky3D"]
+transform = Transform3D(0, -0.483212, 0.875503, -0.799909, 0.525408, 0.289986, -0.600121, -0.700323, -0.386526, 0.875503, 0.289986, -0.386526)
 light_color = Color(0.572549, 0.776471, 0.956863, 1)
 light_energy = 0.0
 shadow_enabled = true
@@ -65,8 +63,8 @@ ground_color = Color(0.3, 0.3, 0.3, 1)
 sky_layers = 4
 sky_render_priority = -128
 horizon_level = 0.0
-sun_altitude = -41.7247
-sun_azimuth = -159.155
+sun_altitude = -39.8126
+sun_azimuth = -191.164
 sun_disk_color = Color(0.996094, 0.541334, 0.140076, 1)
 sun_disk_intensity = 2.0
 sun_disk_size = 0.015
@@ -74,8 +72,8 @@ sun_light_path = NodePath("../SunLight")
 sun_light_color = Color(1, 1, 1, 1)
 sun_horizon_light_color = Color(0.98, 0.523, 0.294, 1)
 sun_light_energy = 1.0
-moon_altitude = -129.428
-moon_azimuth = -326.968
+moon_altitude = -137.089
+moon_azimuth = -353.346
 moon_color = Color(1, 1, 1, 1)
 moon_size = 0.07
 enable_set_moon_texture = false
@@ -83,7 +81,7 @@ moon_resolution = 2
 moon_light_path = NodePath("../MoonLight")
 moon_light_color = Color(0.572549, 0.776471, 0.956863, 1)
 moon_light_energy = 0.3
-deep_space_euler = Vector3(1.29154, 3.14159, 1.64893)
+deep_space_euler = Vector3(1.29154, -3.14159, 1.25217)
 background_color = Color(0.709804, 0.709804, 0.709804, 0.854902)
 set_background_texture = false
 stars_field_color = Color(1, 1, 1, 1)
@@ -150,7 +148,7 @@ script = ExtResource("3_lquwl")
 dome_path = NodePath("../Skydome")
 system_sync = false
 total_cycle_in_minutes = 1217.8
-total_hours = 10.8534
+total_hours = 12.3649
 day = 1
 month = 1
 year = 2025
@@ -163,3 +161,14 @@ utc = 7.0
 
 [node name="ChunkeeWorldNode" type="ChunkeeWorldNode" parent="."]
 material = SubResource("ShaderMaterial_lquwl")
+
+[node name="CharacterBody3D" type="CharacterBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 10, 0)
+script = ExtResource("1_7mycd")
+sprint_speed = 100.0
+
+[node name="Camera3D" type="Camera3D" parent="CharacterBody3D"]
+near = 0.01
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="CharacterBody3D"]
+shape = SubResource("CapsuleShape3D_7mycd")

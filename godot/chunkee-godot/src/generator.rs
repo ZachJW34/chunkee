@@ -19,7 +19,7 @@ pub struct WorldGenerator {
 
 impl WorldGenerator {
     pub fn new() -> Self {
-        let mut noise = HybridMulti::<Perlin>::new(1234);
+        let mut noise = HybridMulti::<Perlin>::new(9000);
         noise.octaves = 5;
         noise.frequency = 0.002;
         noise.lacunarity = 2.2;
@@ -60,7 +60,7 @@ impl VoxelGenerator for WorldGenerator {
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 let height_val = height_map[(x as usize) + (z as usize) * CHUNK_SIZE_USIZE];
-                let terrain_height = (height_val * 64.0) + 64.0;
+                let terrain_height = height_val * 64.0;
 
                 for y in 0..CHUNK_SIZE {
                     let lv = LocalVector::new(x, y, z);

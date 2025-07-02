@@ -12,7 +12,7 @@ use chunkee_core::{
 };
 use godot::{
     classes::{
-        ArrayMesh, Camera3D, MeshInstance3D, ShaderMaterial,
+        ArrayMesh, MeshInstance3D, ShaderMaterial,
         mesh::{ArrayFormat, PrimitiveType},
     },
     prelude::*,
@@ -30,7 +30,6 @@ unsafe impl ExtensionLibrary for ChunkeeGodotExtension {}
 pub struct ChunkeeWorldNode {
     base: Base<Node3D>,
     voxel_world: ChunkeeWorld<MyVoxels>,
-    camera_3d: Option<Gd<Camera3D>>,
     rendered_chunks: HashMap<ChunkVector, Gd<MeshInstance3D>>,
 
     // #[export]
@@ -44,7 +43,7 @@ impl INode3D for ChunkeeWorldNode {
     fn init(base: Base<Node3D>) -> Self {
         println!("Initializing ChunkeeWorldNode");
         let config = ChunkeeWorldConfig {
-            radius: 10,
+            radius: 20,
             generator: Box::new(WorldGenerator::new()),
         };
         let voxel_world: ChunkeeWorld<MyVoxels> = ChunkeeWorld::new(config);
@@ -52,40 +51,34 @@ impl INode3D for ChunkeeWorldNode {
         Self {
             base,
             voxel_world,
-            camera_3d: None,
             material: None,
             rendered_chunks: HashMap::new(),
         }
     }
 
     fn ready(&mut self) {
-        if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
-            self.camera_3d = Some(camera);
-            self.voxel_world.enable_pipeline();
+        self.voxel_world.enable_pipeline();
 
-            // Debug
-            // self.voxel_world.update(camera_pos);
-            // std::thread::sleep(std::time::Duration::from_millis(100));
-            // self.voxel_world
-            //     .set_voxel_at(MyVoxels::Grass, IVec3::new(0, 0, 0));
-            // self.voxel_world
-            //     .set_voxel_at(MyVoxels::Grass, IVec3::new(-1, 0, 0));
-            // self.voxel_world
-            //     .set_voxel_at(MyVoxels::Grass, IVec3::new(0, 0, -1));
-            // self.voxel_world
-            //     .set_voxel_at(MyVoxels::Grass, IVec3::new(0, -1, 0));
-        } else {
-            println!("No camera found");
-        }
+        // Debug
+        // self.voxel_world.update(camera_pos);
+        // std::thread::sleep(std::time::Duration::from_millis(100));
+        // self.voxel_world
+        //     .set_voxel_at(MyVoxels::Grass, IVec3::new(0, 0, 0));
+        // self.voxel_world
+        //     .set_voxel_at(MyVoxels::Grass, IVec3::new(-1, 0, 0));
+        // self.voxel_world
+        //     .set_voxel_at(MyVoxels::Grass, IVec3::new(0, 0, -1));
+        // self.voxel_world
+        //     .set_voxel_at(MyVoxels::Grass, IVec3::new(0, -1, 0));
     }
 
     fn process(&mut self, _delta: f64) {
-        if let Some(camera) = self.camera_3d.clone() {
+        if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
             let camera_pos = Vec3::from_array(camera.get_global_position().to_array());
-            let camera_data = camera.to_camera_data();
-            self.voxel_world.update(camera_data);
-            // TODO, figure out config handling
+            self.voxel_world.update(camera.to_camera_data());
             self.render(self.voxel_world.radius, camera_pos);
+        } else {
+            println!("Cannot update without camera")
         }
     }
 }

@@ -1,4 +1,4 @@
-use glam::IVec3;
+use glam::{IVec3, Vec3};
 
 // pub const WORLD_CHUNK_HEIGHT: i32 = 128;
 pub const CHUNK_SIZE: i32 = 32;
@@ -42,6 +42,11 @@ pub fn idx_to_lv(idx: usize) -> IVec3 {
         y: (idx / CHUNK_SIZE) % CHUNK_SIZE,
         z: idx / (CHUNK_SIZE * CHUNK_SIZE),
     }
+}
+
+#[inline(always)]
+pub fn camera_vec3_to_cv(pos: Vec3) -> ChunkVector {
+    wv_to_cv(pos.floor().as_ivec3())
 }
 
 // #[inline(always)]

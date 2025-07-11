@@ -1,11 +1,12 @@
-[gd_scene load_steps=13 format=3 uid="uid://cxj4062ca64qg"]
+[gd_scene load_steps=17 format=3 uid="uid://cxj4062ca64qg"]
 
 [ext_resource type="Script" uid="uid://detcpral3kwk2" path="res://scripts/PlayerController.gd" id="1_7mycd"]
 [ext_resource type="Script" uid="uid://cdk4h6kxxjfqt" path="res://addons/sky_3d/src/Sky3D.gd" id="1_h2yge"]
 [ext_resource type="Script" uid="uid://bmlw0ecsxxk3o" path="res://addons/sky_3d/src/Skydome.gd" id="2_1bvp3"]
 [ext_resource type="Script" uid="uid://bln4txadkk3b1" path="res://addons/sky_3d/src/TimeOfDay.gd" id="3_lquwl"]
-[ext_resource type="Shader" uid="uid://cvaaowgm2js7v" path="res://shaders/voxel.gdshader" id="5_7mycd"]
-[ext_resource type="CompressedTexture2DArray" uid="uid://sddj7xoo433c" path="res://textures/texture_array.png" id="6_272bh"]
+[ext_resource type="Shader" uid="uid://cvaaowgm2js7v" path="res://shaders/voxel_opaque.gdshader" id="5_7mycd"]
+[ext_resource type="CompressedTexture2DArray" uid="uid://225offb8yto0" path="res://textures/texture_array.png" id="5_272bh"]
+[ext_resource type="Shader" uid="uid://u2fw4wx7ntjk" path="res://shaders/voxel_transparent.gdshader" id="6_272bh"]
 
 [sub_resource type="PhysicalSkyMaterial" id="PhysicalSkyMaterial_7mycd"]
 use_debanding = false
@@ -21,17 +22,30 @@ ambient_light_color = Color(1, 1, 1, 1)
 reflected_light_source = 2
 tonemap_mode = 3
 tonemap_white = 6.0
+ssao_enabled = true
 
 [sub_resource type="CameraAttributesPractical" id="CameraAttributesPractical_kek77"]
 
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_lquwl"]
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_5vw27"]
 render_priority = 0
 shader = ExtResource("5_7mycd")
-shader_parameter/texture_array = ExtResource("6_272bh")
-shader_parameter/atlas_columns = 4
+shader_parameter/texture_array = ExtResource("5_272bh")
+shader_parameter/atlas_columns = 6
+shader_parameter/ao_intensity = 0.5
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_7mycd"]
+render_priority = 0
+shader = ExtResource("6_272bh")
+shader_parameter/texture_array = ExtResource("5_272bh")
+shader_parameter/atlas_columns = 6
 shader_parameter/ao_intensity = 0.5
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_7mycd"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_272bh"]
+albedo_color = Color(1, 0, 0, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_5vw27"]
 
 [node name="Node3D" type="Node3D"]
 
@@ -39,16 +53,17 @@ shader_parameter/ao_intensity = 0.5
 environment = SubResource("Environment_5vw27")
 camera_attributes = SubResource("CameraAttributesPractical_kek77")
 script = ExtResource("1_h2yge")
-current_time = 12.3649
+current_time = 13.725
 minutes_per_day = 1217.8
 metadata/_custom_type_script = "uid://cdk4h6kxxjfqt"
 
 [node name="SunLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.992286, -0.123973, 0.633045, -0.0959692, 0.768143, -0.774115, -0.0784804, 0.628162, -0.123973, 0.768143, 0.628162)
+transform = Transform3D(0, -0.902967, -0.42971, 0.661842, -0.322129, 0.676903, -0.749643, -0.2844, 0.597622, -0.42971, 0.676903, 0.597622)
 shadow_enabled = true
 
 [node name="MoonLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.483212, 0.875503, -0.799909, 0.525408, 0.289986, -0.600121, -0.700323, -0.386526, 0.875503, 0.289986, -0.386526)
+transform = Transform3D(0, -0.572683, 0.819777, -0.650211, 0.622828, 0.435098, -0.759754, -0.533028, -0.372365, 0.819777, 0.435098, -0.372365)
+visible = false
 light_color = Color(0.572549, 0.776471, 0.956863, 1)
 light_energy = 0.0
 shadow_enabled = true
@@ -63,8 +78,8 @@ ground_color = Color(0.3, 0.3, 0.3, 1)
 sky_layers = 4
 sky_render_priority = -128
 horizon_level = 0.0
-sun_altitude = -39.8126
-sun_azimuth = -191.164
+sun_altitude = -47.3979
+sun_azimuth = -215.717
 sun_disk_color = Color(0.996094, 0.541334, 0.140076, 1)
 sun_disk_intensity = 2.0
 sun_disk_size = 0.015
@@ -72,8 +87,8 @@ sun_light_path = NodePath("../SunLight")
 sun_light_color = Color(1, 1, 1, 1)
 sun_horizon_light_color = Color(0.98, 0.523, 0.294, 1)
 sun_light_energy = 1.0
-moon_altitude = -137.089
-moon_azimuth = -353.346
+moon_altitude = -123.402
+moon_azimuth = -38.4343
 moon_color = Color(1, 1, 1, 1)
 moon_size = 0.07
 enable_set_moon_texture = false
@@ -81,7 +96,7 @@ moon_resolution = 2
 moon_light_path = NodePath("../MoonLight")
 moon_light_color = Color(0.572549, 0.776471, 0.956863, 1)
 moon_light_energy = 0.3
-deep_space_euler = Vector3(1.29154, -3.14159, 1.25217)
+deep_space_euler = Vector3(1.29154, -3.14159, 0.843485)
 background_color = Color(0.709804, 0.709804, 0.709804, 0.854902)
 set_background_texture = false
 stars_field_color = Color(1, 1, 1, 1)
@@ -148,8 +163,8 @@ script = ExtResource("3_lquwl")
 dome_path = NodePath("../Skydome")
 system_sync = false
 total_cycle_in_minutes = 1217.8
-total_hours = 12.3649
-day = 1
+total_hours = 13.725
+day = 4
 month = 1
 year = 2025
 celestials_calculations = 1
@@ -160,15 +175,34 @@ longitude = 108.0
 utc = 7.0
 
 [node name="ChunkeeWorldNode" type="ChunkeeWorldNode" parent="."]
-material = SubResource("ShaderMaterial_lquwl")
+opaque_material = SubResource("ShaderMaterial_5vw27")
+translucent_material = SubResource("ShaderMaterial_7mycd")
 
 [node name="CharacterBody3D" type="CharacterBody3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 10, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 40, 0)
 script = ExtResource("1_7mycd")
 sprint_speed = 100.0
 
 [node name="Camera3D" type="Camera3D" parent="CharacterBody3D"]
-near = 0.01
+current = true
+fov = 60.0
+size = 0.05
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="CharacterBody3D"]
 shape = SubResource("CapsuleShape3D_7mycd")
+
+[node name="TorchLight" type="OmniLight3D" parent="CharacterBody3D"]
+transform = Transform3D(0.999848, -0.0174524, 0, 0.0174524, 0.999848, 0, 0, 0, 1, 0, 0, 0)
+light_energy = 5.222
+light_volumetric_fog_energy = 6.0
+light_size = 0.277
+light_specular = 0.0
+omni_range = 17.959
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+transform = Transform3D(32, 0, 0, 0, 32, 0, 0, 0, 32, -48, 48, -176)
+visible = false
+material_override = SubResource("StandardMaterial3D_272bh")
+transparency = 0.5
+cast_shadow = 0
+mesh = SubResource("BoxMesh_5vw27")

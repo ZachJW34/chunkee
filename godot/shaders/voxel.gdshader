@@ -14,10 +14,8 @@ void vertex() {
 }
 
 vec3 apply_normal_map(vec3 tangent, vec3 binormal, vec3 normal, vec3 normal_map_sample) {
-    // Convert normal map from [0, 1] to [-1, 1]
     vec3 n = normalize(normal_map_sample * 2.0 - 1.0);
 
-    // Construct TBN matrix
     mat3 tbn = mat3(normalize(tangent), normalize(binormal), normalize(normal));
     return normalize(tbn * n);
 }

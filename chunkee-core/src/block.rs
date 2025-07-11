@@ -1,6 +1,6 @@
 use std::fmt;
 
-use block_mesh::Voxel as BlockMeshVoxel;
+pub use block_mesh::VoxelVisibility;
 use glam::{IVec3, Mat3, Vec3};
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +108,11 @@ impl VoxelId {
         self.0 &= !(layout::ROTATION_MASK << layout::ROTATION_SHIFT);
         self.0 |= (rotation.0 as u16) << layout::ROTATION_SHIFT;
         self
+    }
+
+    #[inline(always)]
+    pub fn to_voxel<V: ChunkeeVoxel>(&self) -> V {
+        V::from(self.type_id())
     }
 }
 
@@ -221,8 +226,10 @@ pub enum TextureMapping {
 pub trait Block: Default {
     fn name(&self) -> &'static str;
     fn texture_mapping(&self) -> TextureMapping;
-    fn is_solid(&self) -> bool {
-        true
+    // Will need to tweak this. Should there be an enum? Opaque/Translucent/Empty? How does this play into optimizations (solid count)
+    // For now, only air will be false
+    fn visibilty(&self) -> VoxelVisibility {
+        VoxelVisibility::Opaque
     }
     fn texture_id(&self, world_face: BlockFace, rotation: Rotation) -> TextureId {
         match self.texture_mapping() {
@@ -242,63 +249,4 @@ pub trait Block: Default {
 pub trait Where<T> {}
 impl<T, U> Where<U> for T {}
 
-pub trait ChunkeeVoxel:
-    Block + Copy + Default + From<BlockTypeId> + Into<BlockTypeId> + BlockMeshVoxel
-{
-}
-
-// #[macro_export]
-// macro_rules! define_voxels {
-//     (
-//         pub enum $name:ident {
-//             $( ($id:expr, $type:ident) ),*
-//             ,
-//         }
-//     ) => {
-//         #[derive(Debug, Clone, Copy)]
-//         pub enum $name {
-//             $( $type($type) ),*
-//         }
-
-//         impl $crate::block::Block for $name {
-//             fn name(&self) -> &'static str {
-//                 match self {
-//                     $( $name::$type(inner) => inner.name() ),*
-//                 }
-//             }
-//             fn texture_mapping(&self, rotation: $crate::block::Rotation) -> $crate::block::TextureMapping {
-//                 match self {
-//                     $( $name::$type(inner) => inner.texture_mapping(rotation) ),*
-//                 }
-//             }
-//             fn is_solid(&self) -> bool {
-//                 match self {
-//                     $( $name::$type(inner) => inner.is_solid() ),*
-//                 }
-//             }
-//             fn light_emitted(&self) -> $crate::block::LightLevel {
-//                 match self {
-//                     $( $name::$type(inner) => inner.light_emitted() ),*
-//                 }
-//             }
-//         }
-//         impl Default for $name {
-//             fn default() -> Self {
-//                 <Self as $crate::block::Voxel>::from_type_id(0)
-//             }
-//         }
-//         impl $crate::block::Voxel for $name {
-//             fn from_type_id(type_id: $crate::block::BlockTypeId) -> Self {
-//                 match type_id {
-//                     $( $id => $name::$type(<$type>::default()), )*
-//                     _ => Self::default()
-//                 }
-//             }
-//             fn to_type_id(&self) -> $crate::block::BlockTypeId {
-//                 match self {
-//                     $( $name::$type(_) => $id, )*
-//                 }
-//             }
-//         }
-//     }
-// }
+pub trait ChunkeeVoxel: Block + Copy + Default + From<BlockTypeId> + Into<BlockTypeId> {}

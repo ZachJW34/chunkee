@@ -13,7 +13,6 @@ dashmap = "6.1.0"
 glam = "0.30.4"
 lz4 = "1.28.1"
 mikktspace = "0.3.0"
-noise = "0.9.0"
 rayon = "1.10.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde-big-array = "0.5.1"

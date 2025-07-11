@@ -1,5 +1,5 @@
-use crate::{chunk::Chunk, coords::WorldVector};
+use crate::{chunk::ChunkLOD, coords::WorldVector};
 
 pub trait VoxelGenerator: Send + Sync {
-    fn apply(&self, origin_wv: WorldVector, chunk: &mut Chunk);
+    fn apply(&self, chunk_start: WorldVector, chunk: &mut ChunkLOD);
 }

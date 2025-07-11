@@ -1,9 +1,29 @@
 use glam::{IVec3, Vec3};
 
 use crate::{
+    chunk::LOD,
     coords::{CHUNK_SIZE, ChunkVector, cv_to_wv, wv_to_cv},
-    pipeline::{PipelineState, PrioritizedWorkItem, WorkQueue, WorldChunk, WorldChunks},
 };
+
+const LOD1_DIST: f32 = 4.0 * CHUNK_SIZE as f32;
+const LOD2_DIST: f32 = 8.0 * CHUNK_SIZE as f32;
+
+const LOD1_DIST_SQ: f32 = LOD1_DIST * LOD1_DIST; // e.g., 128*128 = 16384
+const LOD2_DIST_SQ: f32 = LOD2_DIST * LOD2_DIST; // e.g., 256*256 = 65536
+
+pub const LOD_NIL: LOD = 0;
+
+pub fn calc_lod(cv: ChunkVector, camera_pos: Vec3) -> LOD {
+    let distance_sq = cv_camera_distance_sq(cv, camera_pos);
+
+    if distance_sq < LOD1_DIST_SQ {
+        1
+    } else if distance_sq < LOD2_DIST_SQ {
+        2
+    } else {
+        3
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Plane {
@@ -70,110 +90,90 @@ impl Frustum {
     }
 }
 
-// const UPDATE_GRID_CELL_SIZE: f32 = 16.0;
+pub struct ChunkStreamResult {
+    pub cv: ChunkVector,
+    pub lod: LOD,
+    pub priority: u32,
+}
 
 pub struct ChunkStreamer {
-    prev_cam_cv: Option<IVec3>,
+    previous_camera_cv: IVec3,
+    radius_xz: u32,
+    radius_y: u32,
 }
 
 impl ChunkStreamer {
-    pub fn new() -> Self {
-        Self { prev_cam_cv: None }
+    pub fn new(radius_xz: u32, radius_y: u32) -> Self {
+        Self {
+            previous_camera_cv: IVec3::MAX,
+            radius_xz,
+            radius_y,
+        }
     }
 
-    pub fn preprocess_chunks(
-        &mut self,
-        camera_data: &CameraData,
-        radius: u32,
-        world_chunks: &WorldChunks,
-        load_queue: &WorkQueue,
-        unload_queue: &WorkQueue,
-    ) {
+    pub fn stream_chunks(&mut self, camera_data: &CameraData) -> Option<Vec<ChunkStreamResult>> {
         let curr_cam_cv = wv_to_cv((camera_data.pos.floor()).as_ivec3());
-        if let Some(previous_cell) = self.prev_cam_cv {
-            if previous_cell == curr_cam_cv {
-                return;
-            }
+        if self.previous_camera_cv == curr_cam_cv {
+            return None;
         }
-
         println!("Entered curr_cam_cv: {curr_cam_cv:?}");
 
-        let chunkvs_to_unload = world_chunks
-            .iter()
-            .filter_map(|e| {
-                let cv = *e.key();
-                if !is_chunk_in_range(cv, camera_data.pos, radius)
-                    && e.state != PipelineState::NeedsUnload
-                {
-                    return Some(cv);
+        self.previous_camera_cv = curr_cam_cv;
+        let chunks_in_range = self.get_chunks_in_range(camera_data);
+
+        Some(chunks_in_range)
+    }
+
+    fn get_chunks_in_range(&self, camera_data: &CameraData) -> Vec<ChunkStreamResult> {
+        let camera_cv = wv_to_cv(camera_data.pos.as_ivec3());
+
+        let mut chunks_in_range =
+            Vec::with_capacity(calc_total_chunks(self.radius_xz, self.radius_y) as usize);
+        let radius_xz_i32 = self.radius_xz as i32;
+        let radius_i32_y = self.radius_y as i32;
+
+        for y in -radius_i32_y..=radius_i32_y {
+            for z in -radius_xz_i32..=radius_xz_i32 {
+                for x in -radius_xz_i32..=radius_xz_i32 {
+                    let cv = camera_cv + IVec3::new(x, y, z);
+                    let lod = calc_lod(cv, camera_data.pos);
+                    let priority = calculate_chunk_priority(cv, camera_data);
+                    chunks_in_range.push(ChunkStreamResult { cv, lod, priority });
                 }
-                None
-            })
-            .collect::<Vec<_>>();
-
-        let mut unload_queue: std::sync::MutexGuard<
-            '_,
-            std::collections::BinaryHeap<PrioritizedWorkItem>,
-        > = unload_queue.lock().unwrap();
-        for cv in chunkvs_to_unload {
-            world_chunks.alter(&cv, |_, mut cs| {
-                cs.state = PipelineState::NeedsUnload;
-                cs
-            });
-            let priority = calculate_chunk_priority(cv, camera_data);
-            unload_queue.push(PrioritizedWorkItem { priority, cv: cv });
-        }
-
-        let chunkvs_to_load = get_chunks_in_range(camera_data.pos, radius);
-
-        let mut load_queue = load_queue.lock().unwrap();
-        for cv in chunkvs_to_load {
-            if !world_chunks.contains_key(&cv) {
-                world_chunks.insert(cv, WorldChunk::default());
-                let priority = calculate_chunk_priority(cv, camera_data);
-                load_queue.push(PrioritizedWorkItem { priority, cv: cv });
             }
         }
 
-        self.prev_cam_cv = Some(curr_cam_cv);
+        chunks_in_range
     }
 }
 
-pub fn get_chunks_in_range(camera_pos: Vec3, radius: u32) -> Vec<IVec3> {
-    let camera_pos_i = camera_pos.as_ivec3();
-    let camera_cv = wv_to_cv(camera_pos_i);
-
-    let radius = radius as i32;
-    let mut chunk_vs = Vec::with_capacity(((radius * 2 + 1).pow(3)) as usize);
-
-    for y in -radius..=radius {
-        for z in -radius..=radius {
-            for x in -radius..=radius {
-                let chunk_v = camera_cv + IVec3::new(x, y, z);
-                chunk_vs.push(chunk_v);
-            }
-        }
-    }
-
-    chunk_vs.sort_by_key(|cv| (camera_cv - cv).length_squared());
-    chunk_vs
-}
-
-pub fn is_chunk_in_range(cv: IVec3, camera_pos: Vec3, radius: u32) -> bool {
+pub fn should_unload(cv: IVec3, camera_pos: Vec3, radius_xz: u32, radius_y: u32) -> bool {
     let camera_cv = wv_to_cv(camera_pos.as_ivec3());
 
     let dist_x = (cv.x - camera_cv.x).abs();
     let dist_y = (cv.y - camera_cv.y).abs();
     let dist_z = (cv.z - camera_cv.z).abs();
 
-    let radius_i32 = radius as i32;
+    // Add one to prevent chunk thrashing (buffer)
+    let radius_xz = (radius_xz + 1) as i32;
+    let radius_y = (radius_y + 1) as i32;
 
-    dist_x <= radius_i32 && dist_y <= radius_i32 && dist_z <= radius_i32
+    dist_x > radius_xz || dist_z > radius_xz || dist_y > radius_y
+}
+
+pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3) -> f32 {
+    cv_to_wv(cv).as_vec3().distance_squared(camera_pos)
 }
 
 pub fn calculate_chunk_priority(cv: ChunkVector, camera_data: &CameraData) -> u32 {
-    let distance_sq = cv_to_wv(cv).as_vec3().distance_squared(camera_data.pos);
+    let distance_sq = cv_camera_distance_sq(cv, camera_data.pos);
     let not_in_frustum = !camera_data.frustum.is_chunk_in_frustum(cv);
 
-    (distance_sq as u32) + (not_in_frustum as u32) * 10000
+    (distance_sq as u32) + (not_in_frustum as u32) * 100000
+}
+
+pub fn calc_total_chunks(radius_xz: u32, radius_y: u32) -> u32 {
+    let size_xz = 2 * radius_xz + 1;
+    let size_y = 2 * radius_y + 1;
+    size_xz * size_xz * size_y
 }

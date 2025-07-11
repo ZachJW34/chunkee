@@ -109,7 +109,6 @@ dependencies = [
  "glam 0.30.4",
  "lz4",
  "mikktspace",
- "noise",
  "rayon",
  "serde",
  "serde-big-array",

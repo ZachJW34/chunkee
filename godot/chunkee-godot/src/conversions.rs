@@ -4,7 +4,7 @@ use chunkee_core::{
 };
 use godot::{builtin::Vector3, classes::Camera3D, obj::Gd};
 
-trait ToGlamVec3 {
+pub trait ToGlamVec3 {
     fn as_vec3(&self) -> Vec3;
 }
 

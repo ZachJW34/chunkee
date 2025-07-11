@@ -5,6 +5,7 @@ extends CharacterBody3D
 @export var mouse_sensitivity: float = 0.15
 
 @onready var camera_3d: Camera3D = $Camera3D
+@onready var torch_light = $TorchLight
 
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -20,7 +21,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 		else:
 			Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-
+			
+func _process(delta: float) -> void:
+	if Input.is_action_just_pressed("toggle_torch"):
+		print("toggling torch state from %s to %s" % [torch_light.visible, !torch_light.visible])
+		torch_light.visible = !torch_light.visible
+			
 func _physics_process(delta: float) -> void:
 	var input_dir := Vector3.ZERO
 	

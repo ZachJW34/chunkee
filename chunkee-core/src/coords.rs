@@ -49,7 +49,43 @@ pub fn camera_vec3_to_cv(pos: Vec3) -> ChunkVector {
     wv_to_cv(pos.floor().as_ivec3())
 }
 
+pub const NEIGHBOR_OFFSETS: [IVec3; 27] = [
+    IVec3::new(-1, -1, -1),
+    IVec3::new(-1, -1, 0),
+    IVec3::new(-1, -1, 1),
+    IVec3::new(-1, 0, -1),
+    IVec3::new(-1, 0, 0),
+    IVec3::new(-1, 0, 1),
+    IVec3::new(-1, 1, -1),
+    IVec3::new(-1, 1, 0),
+    IVec3::new(-1, 1, 1),
+    IVec3::new(0, -1, -1),
+    IVec3::new(0, -1, 0),
+    IVec3::new(0, -1, 1),
+    IVec3::new(0, 0, -1),
+    IVec3::new(0, 0, 0),
+    IVec3::new(0, 0, 1),
+    IVec3::new(0, 1, -1),
+    IVec3::new(0, 1, 0),
+    IVec3::new(0, 1, 1),
+    IVec3::new(1, -1, -1),
+    IVec3::new(1, -1, 0),
+    IVec3::new(1, -1, 1),
+    IVec3::new(1, 0, -1),
+    IVec3::new(1, 0, 0),
+    IVec3::new(1, 0, 1),
+    IVec3::new(1, 1, -1),
+    IVec3::new(1, 1, 0),
+    IVec3::new(1, 1, 1),
+];
+
 // #[inline(always)]
 // pub fn cv_to_col_idx(cv: IVec3) -> usize {
 //     (cv.y + WORLD_CHUNK_HEIGHT / 2) as usize
 // }
+
+#[derive(Debug, Clone, Copy)]
+pub struct AABB {
+    pub min: IVec3,
+    pub max: IVec3,
+}

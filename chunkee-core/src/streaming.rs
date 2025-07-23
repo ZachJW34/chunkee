@@ -5,13 +5,27 @@ use crate::{
     coords::{CHUNK_SIZE, ChunkVector, cv_to_wv, wv_to_cv},
 };
 
-const LOD1_DIST: f32 = 4.0 * CHUNK_SIZE as f32;
-const LOD2_DIST: f32 = 8.0 * CHUNK_SIZE as f32;
+const LOD1_DIST: f32 = 8.0 * CHUNK_SIZE as f32;
+const LOD2_DIST: f32 = 16.0 * CHUNK_SIZE as f32;
+const LOD3_DIST: f32 = 64.0 * CHUNK_SIZE as f32;
 
 const LOD1_DIST_SQ: f32 = LOD1_DIST * LOD1_DIST; // e.g., 128*128 = 16384
 const LOD2_DIST_SQ: f32 = LOD2_DIST * LOD2_DIST; // e.g., 256*256 = 65536
+const LOD3_DIST_SQ: f32 = LOD3_DIST * LOD3_DIST; // e.g., 256*256 = 65536
 
 pub const LOD_NIL: LOD = 0;
+
+// pub fn calc_lod(cv: ChunkVector, camera_pos: Vec3) -> LOD {
+//     let distance_sq = cv_camera_distance_sq(cv, camera_pos);
+
+//     if distance_sq < LOD1_DIST_SQ {
+//         1
+//     } else if distance_sq < LOD2_DIST_SQ {
+//         2
+//     } else {
+//         3
+//     }
+// }
 
 pub fn calc_lod(cv: ChunkVector, camera_pos: Vec3) -> LOD {
     let distance_sq = cv_camera_distance_sq(cv, camera_pos);
@@ -20,8 +34,10 @@ pub fn calc_lod(cv: ChunkVector, camera_pos: Vec3) -> LOD {
         1
     } else if distance_sq < LOD2_DIST_SQ {
         2
-    } else {
+    } else if distance_sq < LOD3_DIST_SQ {
         3
+    } else {
+        4
     }
 }
 

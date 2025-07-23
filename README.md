@@ -35,16 +35,19 @@ The project is structured as a Cargo workspace and is made up of two main compon
 ## Improvements
 
 - Project:
-- Move example Godot project out of chunkee-godot and into separate folder
-- make chunkee-godot agnostic
+
+  - Move example Godot project out of chunkee-godot and into separate folder
+  - Make chunkee-godot agnostic
 
 - Storage:
 
-  - Run Length Encoding (RLE) w/ uniform flag: Would allow skipping generation of uniform chunks (all air, all water, all stone).
+  - Run Length Encoding (RLE)?
   - Allow storing of all procedurally generated content?
 
 - Meshing:
-- Seams when a chunk LOD changes and its neighbors haven't been updated yet (jarring)
+
+  - Seams when a chunk LOD changes and its neighbors haven't been updated yet (jarring)
 
 - Generation:
+
   - Come up with system for placing entities across chunk boundaries (trees, buildings etc..)

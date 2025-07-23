@@ -1,5 +1,5 @@
 use chunkee_core::{
-    block::{Block, BlockTypeId, ChunkeeVoxel, TextureMapping},
+    block::{Block, BlockTypeId, ChunkeeVoxel, TextureMapping, VoxelCollision},
     block_mesh::VoxelVisibility,
 };
 
@@ -73,6 +73,13 @@ impl Block for MyVoxels {
             MyVoxels::Water => TextureMapping::All(4),
             MyVoxels::Sand => TextureMapping::All(5),
             _ => TextureMapping::None,
+        }
+    }
+
+    fn collision(&self) -> chunkee_core::block::VoxelCollision {
+        match self {
+            MyVoxels::Air | MyVoxels::Water => VoxelCollision::None,
+            _ => VoxelCollision::Solid,
         }
     }
 }

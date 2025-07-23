@@ -5,10 +5,10 @@ use block_mesh::{
     Voxel, VoxelVisibility, greedy_quads,
     ndshape::{ConstShape, ConstShape3u32},
 };
-use glam::IVec3;
+use glam::{IVec3, Vec3};
 
 use crate::{
-    block::{BLOCK_FACES, BlockFace, ChunkeeVoxel, Rotation, VoxelId},
+    block::{BLOCK_FACES, BlockFace, ChunkeeVoxel, Rotation, VoxelCollision, VoxelId},
     chunk::ChunkLOD,
     coords::{ChunkVector, cv_to_wv},
 };
@@ -16,6 +16,7 @@ use crate::{
 type Shape34 = ConstShape3u32<34, 34, 34>;
 type Shape18 = ConstShape3u32<18, 18, 18>;
 type Shape10 = ConstShape3u32<10, 10, 10>;
+type Shape6 = ConstShape3u32<6, 6, 6>;
 
 #[derive(Debug)]
 pub struct ChunkMeshGroup {
@@ -113,12 +114,11 @@ struct MesherVoxel<T>(VoxelId, PhantomData<T>);
 
 impl<V: ChunkeeVoxel> Voxel for MesherVoxel<V> {
     fn get_visibility(&self) -> VoxelVisibility {
-        let type_id = self.0.type_id();
-        let voxel_enum = V::from(type_id);
-        voxel_enum.visibilty()
+        self.0.to_voxel::<V>().visibilty()
     }
 }
 
+// TODO: Dont merge water, or allow options for not merging certain faces for use in shaders (like water)
 impl<V: ChunkeeVoxel> MergeVoxel for MesherVoxel<V> {
     type MergeValue = VoxelId;
 
@@ -175,6 +175,9 @@ fn run_greedy_mesher<V: ChunkeeVoxel>(
             lod_scale_factor,
             &Shape10 {},
         ),
+        4 => {
+            run_greedy_mesher_generic::<V, Shape6>(cv, padded_voxels, lod_scale_factor, &Shape6 {})
+        }
         _ => panic!("Unsupported chunk size in mesher"),
     }
 }
@@ -431,4 +434,92 @@ fn generate_tangents(mesh_data: &mut ChunkMeshData) {
         mesh_data.tangents = vec![0.0; mesh_data.positions.len() * 4];
         mikktspace::generate_tangents(mesh_data);
     }
+}
+
+//////////////////// Physics ////////////////////////////////
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct PhysicsMesherVoxel<T>(VoxelId, PhantomData<T>);
+
+impl<V: ChunkeeVoxel> Voxel for PhysicsMesherVoxel<V> {
+    fn get_visibility(&self) -> VoxelVisibility {
+        match self.0.to_voxel::<V>().collision() {
+            VoxelCollision::None => VoxelVisibility::Empty,
+            VoxelCollision::Solid => VoxelVisibility::Opaque,
+        }
+    }
+}
+
+impl<V: ChunkeeVoxel> MergeVoxel for PhysicsMesherVoxel<V> {
+    type MergeValue = bool;
+
+    fn merge_value(&self) -> Self::MergeValue {
+        true
+    }
+}
+
+pub fn mesh_physics_chunk<V: ChunkeeVoxel>(cv: ChunkVector, chunk: Box<ChunkLOD>) -> Vec<Vec3> {
+    let padded_side = 32 + 2;
+    let padded_volume = padded_side * padded_side * padded_side;
+    let mut padded_voxels = vec![VoxelId::AIR; padded_volume as usize];
+    let pos_to_idx =
+        |p: IVec3| (p.x + p.y * padded_side + p.z * padded_side * padded_side) as usize;
+
+    for z in 0..32 {
+        for y in 0..32 {
+            for x in 0..32 {
+                let local_pos = IVec3::new(x, y, z);
+                let padded_pos = local_pos + 1;
+                padded_voxels[pos_to_idx(padded_pos)] = chunk.get_voxel(local_pos);
+            }
+        }
+    }
+
+    let mesher_voxels: &[PhysicsMesherVoxel<V>] = unsafe {
+        std::slice::from_raw_parts(
+            padded_voxels.as_ptr() as *const PhysicsMesherVoxel<V>,
+            padded_voxels.len(),
+        )
+    };
+
+    let mut buffer = GreedyQuadsBuffer::new(padded_voxels.len());
+    greedy_quads(
+        mesher_voxels,
+        &Shape34 {},
+        [0; 3],
+        [33; 3],
+        &RIGHT_HANDED_Y_UP_CONFIG.faces,
+        &mut buffer,
+    );
+
+    let chunk_offset = cv_to_wv(cv).as_vec3();
+    let mut triangles = Vec::with_capacity(buffer.quads.num_quads() * 2 * 3);
+
+    for (face, quads) in RIGHT_HANDED_Y_UP_CONFIG
+        .faces
+        .iter()
+        .zip(buffer.quads.groups.into_iter())
+    {
+        for quad in quads.into_iter() {
+            let positions = face.quad_mesh_positions(&quad.into(), 1.0);
+
+            let indices = face.quad_mesh_indices(0);
+
+            let p = [
+                Vec3::from_array(positions[0]),
+                Vec3::from_array(positions[1]),
+                Vec3::from_array(positions[2]),
+                Vec3::from_array(positions[3]),
+            ];
+
+            // 4. Use the canonical indices to build the triangle soup correctly.
+            for &i in indices.iter() {
+                let local_pos = p[i as usize];
+                let world_pos = (local_pos - Vec3::ONE) + chunk_offset;
+                triangles.push(world_pos);
+            }
+        }
+    }
+
+    triangles
 }

@@ -1,23 +1,32 @@
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 use glam::IVec3;
 
 use crate::{
-    block::ChunkeeVoxel,
-    chunk::{ChunkLOD, Deltas, LOD},
+    block::{BLOCK_FACES, ChunkeeVoxel, VoxelId},
+    chunk::{ChunkLOD, LOD},
     coords::{ChunkVector, camera_vec3_to_cv},
+    hasher::BuildMortonHasher,
     streaming::CameraData,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum IOState {
-    DeltasNeeded,
-    DeltasLoading,
-    DeltasLoaded,
+#[derive(Debug, Clone)]
+pub struct Deltas(pub HashMap<ChunkVector, VoxelId, BuildMortonHasher>);
+
+impl Default for Deltas {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+pub fn neighbors_of(cv: IVec3) -> [ChunkVector; 6] {
+    BLOCK_FACES.map(|face| cv + face.into_normal())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ComputeState {
+pub enum PipelineState {
+    DeltasNeeded,
+    DeltasLoading,
     GenerationNeeded,
     Generating,
     MeshNeeded,
@@ -28,24 +37,27 @@ pub enum ComputeState {
 #[derive(Debug, Clone)]
 pub struct WorldChunk {
     pub cv: ChunkVector,
-    pub io_state: IOState,
-    pub compute_state: ComputeState,
+    // pub io_state: IOState,
+    pub state: PipelineState,
     pub chunk_lod: ChunkLOD,
     pub deltas: Deltas,
     pub is_dirty: bool,
     pub priority: u32,
+    // Some if the generator produced a chunk composed entirely of one voxel type
+    pub uniform_voxel_id: Option<VoxelId>,
 }
 
 impl Default for WorldChunk {
     fn default() -> Self {
         Self {
             cv: ChunkVector::MAX,
-            io_state: IOState::DeltasNeeded,
-            compute_state: ComputeState::GenerationNeeded,
+            // io_state: IOState::DeltasNeeded,
+            state: PipelineState::DeltasNeeded,
             chunk_lod: ChunkLOD::new(3),
             deltas: Deltas::default(),
             is_dirty: false,
             priority: 0,
+            uniform_voxel_id: None,
         }
     }
 }
@@ -54,12 +66,13 @@ impl WorldChunk {
     pub fn new(cv: ChunkVector, lod: LOD, priority: u32) -> Self {
         Self {
             cv,
-            io_state: IOState::DeltasNeeded,
-            compute_state: ComputeState::GenerationNeeded,
+            // io_state: IOState::DeltasNeeded,
+            state: PipelineState::DeltasNeeded,
             chunk_lod: ChunkLOD::new(lod),
             deltas: Deltas::default(),
             is_dirty: false,
             priority,
+            uniform_voxel_id: None,
         }
     }
 
@@ -73,12 +86,16 @@ impl WorldChunk {
     }
 
     pub fn is_stable(&self) -> bool {
-        self.io_state == IOState::DeltasLoaded
-            && matches!(
-                self.compute_state,
-                ComputeState::MeshNeeded | ComputeState::Meshing | ComputeState::MeshReady
-            )
+        matches!(
+            self.state,
+            PipelineState::MeshNeeded | PipelineState::Meshing | PipelineState::MeshReady
+        )
     }
+}
+
+pub enum GridOp<'a> {
+    Recycle(&'a mut WorldChunk, ChunkVector),
+    Keep(&'a mut WorldChunk),
 }
 
 pub struct ChunkGrid {
@@ -140,9 +157,9 @@ impl ChunkGrid {
         IVec3::new(x, y, z)
     }
 
-    pub fn shift_origin_with<F>(&mut self, camera_data: &CameraData, mut on_remap: F) -> bool
+    pub fn shift_and_remap<F>(&mut self, camera_data: &CameraData, mut on_remap: F) -> bool
     where
-        F: FnMut(IVec3, &mut WorldChunk),
+        F: FnMut(GridOp),
     {
         let camera_cv = camera_vec3_to_cv(camera_data.pos);
         let dims = self.dimensions;
@@ -152,21 +169,17 @@ impl ChunkGrid {
             return false;
         }
 
-        println!("Entering cv: {camera_cv:?} ({:?})", camera_data.pos);
         let t = Instant::now();
 
         if self.grid_origin == IVec3::MAX {
             self.grid_origin = new_origin;
-
             for i in 0..self.chunks.len() {
                 let local = Self::idx_to_local(i, dims);
                 let new_cv = new_origin + local;
-                on_remap(new_cv, &mut self.chunks[i]);
+                on_remap(GridOp::Recycle(&mut self.chunks[i], new_cv));
                 self.indices[i] = i;
             }
-
-            println!("[shift_origin_with] init: {:?}", t.elapsed());
-
+            println!("{camera_cv} [shift_and_remap] init: {:?}", t.elapsed());
             return true;
         }
 
@@ -175,40 +188,43 @@ impl ChunkGrid {
         let mut new_indices = vec![usize::MAX; self.chunks.len()];
         let mut used_chunks = vec![false; self.chunks.len()];
 
-        // Pass 1: Preserve chunks that are still visible.
+        // Pass 1: Preserve chunks that are still visible and issue `Keep` callbacks.
         for old_grid_idx in 0..self.indices.len() {
             let chunk_idx = self.indices[old_grid_idx];
-            let chunk_cv = self.chunks[chunk_idx].cv;
+            let cv = self.chunks[chunk_idx].cv;
 
-            if let Some(new_grid_idx) = Self::cv_to_idx_with_origin(chunk_cv, new_origin, dims) {
+            if let Some(new_grid_idx) = Self::cv_to_idx_with_origin(cv, new_origin, dims) {
                 new_indices[new_grid_idx] = chunk_idx;
                 used_chunks[chunk_idx] = true;
+                on_remap(GridOp::Keep(&mut self.chunks[chunk_idx]));
             }
         }
 
         // Pass 2: Collect indices of chunks that are no longer used.
-        let mut free_chunks: Vec<_> = (0..self.chunks.len())
+        let mut recycled_indices: Vec<_> = (0..self.chunks.len())
             .filter(|&i| !used_chunks[i])
             .collect();
 
-        // Pass 3: Fill empty slots in the new grid with recycled chunks.
+        // Pass 3: Fill empty slots in the new grid with recycled chunks and issue `Recycle` callbacks.
         for new_grid_idx in 0..new_indices.len() {
             if new_indices[new_grid_idx] == usize::MAX {
-                new_indices[new_grid_idx] = free_chunks.pop().expect("Not enough free chunks");
+                let recycled_chunk_idx =
+                    recycled_indices.pop().expect("Not enough recycled chunks");
+                new_indices[new_grid_idx] = recycled_chunk_idx;
+
+                let local = Self::idx_to_local(new_grid_idx, dims);
+                let new_cv = new_origin + local;
+
+                on_remap(GridOp::Recycle(
+                    &mut self.chunks[recycled_chunk_idx],
+                    new_cv,
+                ));
             }
         }
 
         self.indices = new_indices;
 
-        // Pass 4: Call on_remap for all chunks in their new positions.
-        for new_grid_idx in 0..self.indices.len() {
-            let chunk_idx = self.indices[new_grid_idx];
-            let local = Self::idx_to_local(new_grid_idx, dims);
-            let new_cv = new_origin + local;
-            on_remap(new_cv, &mut self.chunks[chunk_idx]);
-        }
-
-        println!("[shift_origin_with]: {:?}", t.elapsed());
+        println!("{} [shift_and_remap]: {:?}", camera_cv, t.elapsed());
         true
     }
 }

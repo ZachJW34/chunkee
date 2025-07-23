@@ -1,29 +1,10 @@
 use glam::IVec3;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::{
+    collections::HashMap,
+    hash::{BuildHasherDefault, Hasher},
+};
 
-#[derive(Default)]
-pub struct IdentityHasher(u64);
-
-impl Hasher for IdentityHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, _bytes: &[u8]) {
-        unreachable!("IdentityHasher should only be used with integer keys");
-    }
-
-    fn write_u64(&mut self, i: u64) {
-        self.0 = i;
-    }
-}
-
-pub type BuildIdentityHasher = BuildHasherDefault<IdentityHasher>;
-
-// 2. The Morton Encoder: It turns an IVec3 into a well-distributed u64.
-// =======================================================================
-
-// Helper function to spread the bits of a 16-bit integer out to 48 bits.
+// Morton encoding logic
 fn interleave_bits(input: u16) -> u64 {
     let mut x = input as u64;
     x = (x | (x << 16)) & 0x0000FFFF0000FFFF;
@@ -34,23 +15,56 @@ fn interleave_bits(input: u16) -> u64 {
     x
 }
 
-/// Encodes a 3D position into a 64-bit Z-order curve index.
-/// Coordinates must be within the range [-32768, 32767].
-pub fn morton_encode(pos: IVec3) -> u64 {
+fn morton_encode(pos: IVec3) -> u64 {
     const OFFSET: i32 = 1 << 15;
-    const MIN_COORD: i32 = -OFFSET;
-    const MAX_COORD: i32 = (1 << 16) - 1 - OFFSET;
-
-    debug_assert!(
-        (MIN_COORD..=MAX_COORD).contains(&pos.x)
-            && (MIN_COORD..=MAX_COORD).contains(&pos.y)
-            && (MIN_COORD..=MAX_COORD).contains(&pos.z),
-        "Coordinate out of encodable range!"
-    );
-
     let x = interleave_bits((pos.x + OFFSET) as u16);
     let y = interleave_bits((pos.y + OFFSET) as u16) << 1;
     let z = interleave_bits((pos.z + OFFSET) as u16) << 2;
-
     x | y | z
 }
+
+#[derive(Default)]
+pub struct MortonHasher {
+    components: [i32; 3],
+    count: usize,
+}
+
+impl Hasher for MortonHasher {
+    fn finish(&self) -> u64 {
+        debug_assert!(self.count == 3, "Incomplete IVec3 provided to hasher");
+        let pos = IVec3::new(self.components[0], self.components[1], self.components[2]);
+
+        morton_encode(pos)
+    }
+
+    fn write(&mut self, _bytes: &[u8]) {
+        unreachable!("This hasher is designed for structured data like IVec3");
+    }
+
+    fn write_i32(&mut self, i: i32) {
+        if self.count < 3 {
+            self.components[self.count] = i;
+            self.count += 1;
+        }
+    }
+}
+
+pub type BuildMortonHasher = BuildHasherDefault<MortonHasher>;
+pub type VoxelHashMap<T> = HashMap<IVec3, T, BuildMortonHasher>;
+
+// Example
+// =======================================================================
+// fn main() {
+//     let mut chunk_map: HashMap<IVec3, &str, BuildMortonHasher> =
+//         HashMap::with_hasher(BuildMortonHasher::default());
+
+//     let pos1 = IVec3::new(10, 20, 30);
+//     let pos2 = IVec3::new(123, -456, 789);
+
+//     chunk_map.insert(pos1, "My First Chunk");
+//     chunk_map.insert(pos2, "Another Chunk");
+
+//     if let Some(chunk_data) = chunk_map.get(&pos1) {
+//         println!("Found data for position {}: {}", pos1, chunk_data);
+//     }
+// }

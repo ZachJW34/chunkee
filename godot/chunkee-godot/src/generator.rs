@@ -10,7 +10,7 @@ use chunkee_core::{
 use dashmap::DashMap;
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 
-const SEA_LEVEL: i32 = 0;
+const SEA_LEVEL: i32 = 3;
 const BEACH_HEIGHT: i32 = 2;
 
 #[derive(Clone)]

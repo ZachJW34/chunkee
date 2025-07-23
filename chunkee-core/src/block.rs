@@ -223,11 +223,17 @@ pub enum TextureMapping {
     None,
 }
 
+// What would a ramp voxel look like? or a half slab? How do custom collision
+// shapes get generated?
+#[derive(Debug, Clone, Copy)]
+pub enum VoxelCollision {
+    None,
+    Solid,
+}
+
 pub trait Block: Default {
     fn name(&self) -> &'static str;
     fn texture_mapping(&self) -> TextureMapping;
-    // Will need to tweak this. Should there be an enum? Opaque/Translucent/Empty? How does this play into optimizations (solid count)
-    // For now, only air will be false
     fn visibilty(&self) -> VoxelVisibility {
         VoxelVisibility::Opaque
     }
@@ -244,6 +250,7 @@ pub trait Block: Default {
             TextureMapping::None => 0,
         }
     }
+    fn collision(&self) -> VoxelCollision;
 }
 
 pub trait Where<T> {}

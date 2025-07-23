@@ -1,4 +1,4 @@
-[gd_scene load_steps=17 format=3 uid="uid://cxj4062ca64qg"]
+[gd_scene load_steps=18 format=3 uid="uid://cxj4062ca64qg"]
 
 [ext_resource type="Script" uid="uid://detcpral3kwk2" path="res://scripts/PlayerController.gd" id="1_7mycd"]
 [ext_resource type="Script" uid="uid://cdk4h6kxxjfqt" path="res://addons/sky_3d/src/Sky3D.gd" id="1_h2yge"]
@@ -39,8 +39,18 @@ shader = ExtResource("6_272bh")
 shader_parameter/texture_array = ExtResource("5_272bh")
 shader_parameter/atlas_columns = 6
 shader_parameter/ao_intensity = 0.5
+shader_parameter/water_color = Color(0.1, 0.4, 0.7, 0.5)
+shader_parameter/water_roughness = 0.05
+shader_parameter/wave_strength = 0.05
+shader_parameter/wave_speed = 0.2
+shader_parameter/wave_direction = Vector2(1, 0)
+shader_parameter/refraction_strength = 0.02
+shader_parameter/fresnel_power = 2.0
+shader_parameter/ripple_strength = 0.5
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_7mycd"]
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_272bh"]
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_272bh"]
 albedo_color = Color(1, 0, 0, 1)
@@ -53,16 +63,16 @@ albedo_color = Color(1, 0, 0, 1)
 environment = SubResource("Environment_5vw27")
 camera_attributes = SubResource("CameraAttributesPractical_kek77")
 script = ExtResource("1_h2yge")
-current_time = 13.725
+current_time = 9.78812
 minutes_per_day = 1217.8
 metadata/_custom_type_script = "uid://cdk4h6kxxjfqt"
 
 [node name="SunLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.902967, -0.42971, 0.661842, -0.322129, 0.676903, -0.749643, -0.2844, 0.597622, -0.42971, 0.676903, 0.597622)
+transform = Transform3D(0, -0.874096, 0.485753, 0.667061, 0.361887, 0.651204, -0.745003, 0.324027, 0.583076, 0.485753, 0.651204, 0.583076)
 shadow_enabled = true
 
 [node name="MoonLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.572683, 0.819777, -0.650211, 0.622828, 0.435098, -0.759754, -0.533028, -0.372365, 0.819777, 0.435098, -0.372365)
+transform = Transform3D(0, -0.465219, -0.885196, -0.988653, 0.13297, -0.0698833, 0.150216, 0.875152, -0.45994, -0.885196, -0.0698832, -0.45994)
 visible = false
 light_color = Color(0.572549, 0.776471, 0.956863, 1)
 light_energy = 0.0
@@ -78,8 +88,8 @@ ground_color = Color(0.3, 0.3, 0.3, 1)
 sky_layers = 4
 sky_render_priority = -128
 horizon_level = 0.0
-sun_altitude = -47.3979
-sun_azimuth = -215.717
+sun_altitude = -49.3675
+sun_azimuth = -140.203
 sun_disk_color = Color(0.996094, 0.541334, 0.140076, 1)
 sun_disk_intensity = 2.0
 sun_disk_size = 0.015
@@ -87,8 +97,8 @@ sun_light_path = NodePath("../SunLight")
 sun_light_color = Color(1, 1, 1, 1)
 sun_horizon_light_color = Color(0.98, 0.523, 0.294, 1)
 sun_light_energy = 1.0
-moon_altitude = -123.402
-moon_azimuth = -38.4343
+moon_altitude = -136.467
+moon_azimuth = -7.33209
 moon_color = Color(1, 1, 1, 1)
 moon_size = 0.07
 enable_set_moon_texture = false
@@ -96,7 +106,7 @@ moon_resolution = 2
 moon_light_path = NodePath("../MoonLight")
 moon_light_color = Color(0.572549, 0.776471, 0.956863, 1)
 moon_light_energy = 0.3
-deep_space_euler = Vector3(1.29154, -3.14159, 0.843485)
+deep_space_euler = Vector3(1.29154, 3.14159, 1.80817)
 background_color = Color(0.709804, 0.709804, 0.709804, 0.854902)
 set_background_texture = false
 stars_field_color = Color(1, 1, 1, 1)
@@ -163,8 +173,8 @@ script = ExtResource("3_lquwl")
 dome_path = NodePath("../Skydome")
 system_sync = false
 total_cycle_in_minutes = 1217.8
-total_hours = 13.725
-day = 4
+total_hours = 9.78812
+day = 8
 month = 1
 year = 2025
 celestials_calculations = 1
@@ -180,8 +190,8 @@ translucent_material = SubResource("ShaderMaterial_7mycd")
 
 [node name="CharacterBody3D" type="CharacterBody3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 40, 0)
+safe_margin = 0.1
 script = ExtResource("1_7mycd")
-sprint_speed = 100.0
 
 [node name="Camera3D" type="Camera3D" parent="CharacterBody3D"]
 current = true
@@ -189,6 +199,7 @@ fov = 60.0
 size = 0.05
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="CharacterBody3D"]
+transform = Transform3D(0.95, 0, 0, 0, 0.95, 0, 0, 0, 0.95, 0, 0, 0)
 shape = SubResource("CapsuleShape3D_7mycd")
 
 [node name="TorchLight" type="OmniLight3D" parent="CharacterBody3D"]
@@ -198,6 +209,10 @@ light_volumetric_fog_energy = 6.0
 light_size = 0.277
 light_specular = 0.0
 omni_range = 17.959
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="CharacterBody3D"]
+transform = Transform3D(0.9, 0, 0, 0, 0.9, 0, 0, 0, 0.9, 0, 0, 0)
+mesh = SubResource("CapsuleMesh_272bh")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="."]
 transform = Transform3D(32, 0, 0, 0, 32, 0, 0, 0, 32, -48, 48, -176)

@@ -3,7 +3,7 @@ pub mod chunk;
 pub mod coords;
 pub mod generation;
 pub mod grid;
-mod hasher;
+pub mod hasher;
 pub mod meshing;
 pub mod pipeline;
 pub mod storage;

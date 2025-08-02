@@ -160,18 +160,13 @@ impl Frustum {
 //     }
 // }
 
-pub fn should_unload(cv: IVec3, camera_pos: Vec3, radius_xz: u32, radius_y: u32) -> bool {
+pub fn should_unload(cv: IVec3, camera_pos: Vec3, radius: u32) -> bool {
     let camera_cv = wv_to_cv(camera_pos.as_ivec3());
 
-    let dist_x = (cv.x - camera_cv.x).abs();
-    let dist_y = (cv.y - camera_cv.y).abs();
-    let dist_z = (cv.z - camera_cv.z).abs();
-
-    // Add one to prevent chunk thrashing (buffer)
-    let radius_xz = (radius_xz + 1) as i32;
-    let radius_y = (radius_y + 1) as i32;
-
-    dist_x > radius_xz || dist_z > radius_xz || dist_y > radius_y
+    let diff = (cv - camera_cv).abs();
+    let radius_buffered = (radius + 1) as i32;
+    
+    diff.x > radius_buffered || diff.y > radius_buffered || diff.z > radius_buffered
 }
 
 pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3) -> f32 {

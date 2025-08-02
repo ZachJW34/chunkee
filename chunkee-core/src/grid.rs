@@ -102,12 +102,9 @@ pub struct ChunkGrid {
 }
 
 impl ChunkGrid {
-    pub fn new(radius_x: u32, radius_y: u32, radius_z: u32) -> Self {
-        let dims = IVec3::new(
-            2 * radius_x as i32 + 1,
-            2 * radius_y as i32 + 1,
-            2 * radius_z as i32 + 1,
-        );
+    pub fn new(radius: u32) -> Self {
+        let max_length = 2 * radius + 1;
+        let dims = IVec3::splat(max_length as i32);
         let capacity = (dims.x * dims.y * dims.z) as usize;
 
         Self {

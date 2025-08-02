@@ -20,8 +20,7 @@ use std::{
 };
 
 pub struct ChunkeeWorldConfig {
-    pub radius_xz: u32,
-    pub radius_y: u32,
+    pub radius: u32,
     pub generator: Box<dyn VoxelGenerator>,
 }
 
@@ -36,8 +35,7 @@ pub struct ChunkeeWorld<V: ChunkeeVoxel> {
     pub physics_mesh_queue: PhysicsMeshQueue,
     pub physics_mesh_unload_queue: UnloadQueue,
     pub edits_applied_queue: EditsAppliedQueue,
-    pub radius_xz: u32,
-    pub radius_y: u32,
+    pub radius: u32,
     grid: WorldGrid,
     camera_pos: Vec3,
     chunk_store: Arc<ChunkStore>,
@@ -49,20 +47,18 @@ pub struct ChunkeeWorld<V: ChunkeeVoxel> {
 impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
     pub fn new(config: ChunkeeWorldConfig) -> Self {
         let ChunkeeWorldConfig {
-            radius_xz,
-            radius_y,
+            radius,
             generator,
         } = config;
 
         let chunk_store = Arc::new(ChunkStore::new());
-        let grid = Arc::new(RwLock::new(ChunkGrid::new(radius_xz, radius_y, radius_xz)));
+        let grid = Arc::new(RwLock::new(ChunkGrid::new(radius)));
         let generator = Arc::new(generator);
 
         Self {
             grid,
             chunk_store,
-            radius_xz,
-            radius_y,
+            radius,
             generator,
             camera_pos: Vec3::NAN,
             pipeline: None,

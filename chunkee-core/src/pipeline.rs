@@ -1,12 +1,13 @@
 use std::{
     cmp::Ordering,
-    collections::BinaryHeap,
+    collections::{BinaryHeap, VecDeque},
     num::NonZero,
-    sync::{Arc, Weak},
+    sync::{Arc, Condvar, Mutex, Weak},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
+use crossbeam::queue::SegQueue;
 use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
 use glam::{IVec3, Vec3};
@@ -134,11 +135,11 @@ impl PartialOrd for WorkItem {
 }
 impl Ord for WorkItem {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.priority.cmp(&self.priority)
+        self.priority.cmp(&other.priority)
     }
 }
 
-pub type WorkQueue = BinaryHeap<WorkItem>;
+// pub type WorkQueue = BinaryHeap<WorkItem>;
 
 pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
     world_grid: WorldGrid,
@@ -154,30 +155,30 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
 
         let (t_sx, t_rx) = crossbeam_channel::unbounded::<TaskResult>();
 
-        let io_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
-        let compute_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+        let thread_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
 
         let mut previous_physics_entities: Vec<PhysicsEntity> = vec![];
-        let mut physics_meshes: VoxelHashMap<PhysicsMesh> = Default::default();
+        let mut physics_meshes: Arc<Mutex<VoxelHashMap<PhysicsMesh>>> =
+            Arc::new(Mutex::new(Default::default()));
 
-        struct LOD0Asset(Chunk32);
-        struct LOD0 {
-            cv: ChunkVector,
-            state: PipelineState,
-            data: Weak<LOD0Asset>,
-        }
+        // struct LOD0Asset(Chunk32);
+        // struct LOD0 {
+        //     cv: ChunkVector,
+        //     state: PipelineState,
+        //     data: Weak<LOD0Asset>,
+        // }
 
-        struct LOD1Asset(Chunk64);
-        struct LOD1 {
-            cv: ChunkVector,
-            state: PipelineState,
-            dependents: [Option<Arc<LOD1Asset>>; 7],
-            data: Weak<LOD1Asset>,
-        }
+        // struct LOD1Asset(Chunk64);
+        // struct LOD1 {
+        //     cv: ChunkVector,
+        //     state: PipelineState,
+        //     dependents: [Option<Arc<LOD1Asset>>; 7],
+        //     data: Weak<LOD1Asset>,
+        // }
 
-        let capacity = (17 * 17 * 17) as usize;
-        let world_chunk_tracker: DashMap<ChunkVector, WorldChunk, BuildMortonHasher> =
-            DashMap::with_capacity_and_hasher(capacity, BuildMortonHasher::new());
+        // let capacity = (17 * 17 * 17) as usize;
+        // let world_chunk_tracker: DashMap<ChunkVector, WorldChunk, BuildMortonHasher> =
+        //     DashMap::with_capacity_and_hasher(capacity, BuildMortonHasher::new());
 
         // let lod0_lru: LruCache<ChunkVector, Arc<Chunk32>, BuildMortonHasher> =
         //     LruCache::with_hasher(NonZero::new(1000).unwrap(), BuildMortonHasher::new());
@@ -186,6 +187,176 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
         //     LruCache::with_hasher(NonZero::new(1000).unwrap(), BuildMortonHasher::new());
         // let lod1_state_map: VoxelHashMap<LOD1> = Default::default();
 
+        let cvar = Arc::new(Condvar::new());
+        let load_queue: VecDeque<WorkItem> = VecDeque::new();
+        let mesh_queue: VecDeque<WorkItem> = VecDeque::new();
+        let physics_queue: VecDeque<WorkItem> = VecDeque::new();
+        let queue_lock = Arc::new(Mutex::new((load_queue, mesh_queue, physics_queue)));
+
+        let num_threads = 12;
+
+        enum Job {
+            Load(WorkItem),
+            Mesh(WorkItem),
+            PhysicsMesh(WorkItem),
+        }
+
+        for i in 0..num_threads {
+            let cvar = cvar.clone();
+            let chunk_store = chunk_store.clone();
+            let queue_lock = queue_lock.clone();
+            let generator = generator.clone();
+            let grid = world_grid.clone();
+            let result_sender = result_sender.clone();
+            let physics_meshes = physics_meshes.clone();
+
+            thread::spawn(move || {
+                println!("[Worker {}]: Started.", i);
+
+                loop {
+                    let mut guard = queue_lock.lock().unwrap();
+
+                    let job: Job = if let Some(item) = guard.2.pop_front() {
+                        Job::PhysicsMesh(item)
+                    } else if let Some(item) = guard.1.pop_front() {
+                        Job::Mesh(item)
+                    } else if let Some(item) = guard.0.pop_front() {
+                        Job::Load(item)
+                    } else {
+                        cvar.wait(guard).ok();
+                        continue;
+                    };
+
+                    drop(guard);
+
+                    match job {
+                        Job::Load(item) => {
+                            let cv = item.cv;
+                            if let Some(world_chunk) = grid.write().unwrap().get_mut(cv)
+                                && world_chunk.state == PipelineState::LoadNeeded
+                            {
+                                world_chunk.state = PipelineState::Loading
+                            }
+
+                            let mut chunk = Chunk::new();
+
+                            let persisted_chunk = chunk_store.load_chunk(cv);
+                            let (deltas, uniform_voxel_id) = persisted_chunk
+                                .map(|pc| (pc.deltas, pc.uniform_voxel_id))
+                                .unwrap_or_default();
+
+                            if let Some(uniform) = uniform_voxel_id {
+                                chunk.fill::<V>(uniform);
+
+                                if let Some(world_chunk) = grid.write().unwrap().get_mut(cv)
+                                    && world_chunk.state == PipelineState::Loading
+                                {
+                                    world_chunk.state = PipelineState::MeshNeeded;
+                                    world_chunk.deltas = deltas;
+                                    world_chunk.uniform_voxel_id = Some(uniform);
+                                };
+                            } else {
+                                generator.apply(cv_to_wv(cv), &mut chunk);
+
+                                if let Some(world_chunk) = grid.write().unwrap().get_mut(cv)
+                                    && world_chunk.state == PipelineState::Loading
+                                {
+                                    world_chunk.state = PipelineState::MeshNeeded;
+                                    world_chunk.deltas = deltas;
+                                    world_chunk.uniform_voxel_id = uniform_voxel_id;
+                                };
+                            }
+
+                            cvar.notify_one();
+                        }
+                        Job::Mesh(item) => {
+                            let cv = item.cv;
+                            let mut grid_lock = grid.write().unwrap();
+
+                            let world_chunk = if let Some(world_chunk) = grid_lock.get(cv) {
+                                world_chunk
+                            } else {
+                                continue;
+                            };
+
+                            let neighbors: [Option<&WorldChunk>; 6] = std::array::from_fn(|idx| {
+                                grid_lock.get(cv + BLOCK_FACES[idx].into_normal())
+                            });
+
+                            let not_all_stable = neighbors
+                                .iter()
+                                .any(|op| op.is_some_and(|wc| !wc.is_stable()));
+
+                            if not_all_stable {
+                                // TODO: consider below
+                                // let mut queue_guard = queue_lock.lock().unwrap();
+                                // queue_guard.mesh.push_back(item);
+                                // // Don't notify, as we didn't add "new" valuable work
+                                // continue; // Go back to the top to wait or find other work
+                                continue;
+                            }
+
+                            let complete_neighbors: Box<[Chunk; 6]> =
+                                Box::new(std::array::from_fn(|i| {
+                                    if let Some(n) = neighbors[i] {
+                                        return n.chunk.clone();
+                                    }
+
+                                    Chunk::new()
+                                }));
+
+                            let center = Box::new(world_chunk.chunk.clone());
+
+                            grid_lock.get_mut(cv).unwrap().state = PipelineState::Meshing;
+
+                            drop(grid_lock);
+
+                            let mesh = mesh_chunk::<V>(cv, center, complete_neighbors);
+
+                            if let Some(world_chunk) = grid.write().unwrap().get_mut(cv)
+                                && world_chunk.state == PipelineState::Meshing
+                            {
+                                world_chunk.state = PipelineState::MeshReady;
+                            }
+
+                            result_sender
+                                .send(PipelineResult::MeshReady { cv, mesh })
+                                .ok();
+
+                            cvar.notify_one();
+                        }
+                        Job::PhysicsMesh(item) => {
+                            let cv = item.cv;
+                            let chunk = if let Some(world_chunk) = grid.read().unwrap().get(cv)
+                                && world_chunk.is_stable()
+                            {
+                                Box::new(world_chunk.chunk.clone())
+                            } else {
+                                continue;
+                            };
+
+                            if let Some(p_mesh) = physics_meshes.lock().unwrap().get_mut(&cv) {
+                                p_mesh.state = PhysicsMeshState::Meshing
+                            } else {
+                                continue;
+                            }
+
+                            let mesh = mesh_physics_chunk::<V>(cv, chunk);
+
+                            result_sender
+                                .send(PipelineResult::PhysicsMeshReady { cv, mesh })
+                                .ok();
+
+                            if let Some(p_mesh) = physics_meshes.lock().unwrap().get_mut(&cv) {
+                                p_mesh.state = PhysicsMeshState::MeshReady
+                            } else {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            });
+        }
         loop {
             metrics.batch_print();
             let loop_time = Instant::now();
@@ -203,6 +374,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                         camera_data.replace(cd);
                     }
                     PipelineMessage::PhysicsEntitiesUpdate(new_entities) => {
+                        let mut physics_meshes = physics_meshes.lock().unwrap();
                         for entity in &previous_physics_entities {
                             let cv = camera_vec3_to_cv(entity.pos);
                             for offset in NEIGHBOR_OFFSETS {
@@ -240,6 +412,8 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                                 world_chunk.is_dirty = true;
                                 world_chunk.state = PipelineState::MeshNeeded;
                                 world_chunk.priority = 0;
+
+                                let mut physics_meshes = physics_meshes.lock().unwrap();
 
                                 if let Some(p_mesh) = physics_meshes.get_mut(&cv)
                                     && p_mesh.state != PhysicsMeshState::MeshNeeded
@@ -318,7 +492,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                 drop(grid_lock);
 
                 if !chunks_to_save.is_empty() {
-                    batch_unload_deltas_task(chunks_to_save, &chunk_store, &io_pool);
+                    batch_unload_deltas_task(chunks_to_save, &chunk_store, &thread_pool);
                 }
 
                 // if !chunks_to_load.is_empty() {
@@ -362,10 +536,14 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
             generate_tasks.sort();
             mesh_tasks.sort();
 
+            // for item in generate_tasks.iter().take(10) {
+            //     load_queue.push(item.clone());
+            // }
+
             let mut physics_unloads = vec![];
             let mut physics_loads = vec![];
 
-            physics_meshes.retain(|cv, p_mesh| {
+            physics_meshes.lock().unwrap().retain(|cv, p_mesh| {
                 if p_mesh.dependents == 0 {
                     physics_unloads.push(*cv);
                     return false;
@@ -388,6 +566,24 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                 || !generate_tasks.is_empty()
                 || !mesh_tasks.is_empty()
                 || !physics_loads.is_empty();
+
+            if work_to_do {
+                println!(
+                    "max threads: {} | current threads: {}",
+                    rayon::max_num_threads(),
+                    rayon::current_num_threads()
+                );
+                // for _ in 0..threads_to_spin_up {
+
+                //     let load_queue = load_queue.clone();
+                //     rayon::spawn(move|| {
+                //         if let Some(item) = load_queue.pop() {
+                //             println!("Working on item: {item:?}");
+                //         }
+
+                //     });
+                // }
+            }
 
             if work_to_do {
                 let mut grid_lock = world_grid.write().unwrap();
@@ -478,7 +674,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                             metrics
                                 .get_mut(PipelineMetrics::PhysicsTask)
                                 .record(duration);
-                            if let Some(p_mesh) = physics_meshes.get_mut(&cv)
+                            if let Some(p_mesh) = physics_meshes.lock().unwrap().get_mut(&cv)
                                 && p_mesh.state == PhysicsMeshState::Meshing
                             {
                                 p_mesh.state = PhysicsMeshState::MeshReady;
@@ -490,16 +686,16 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                     }
                 }
 
-                while let Some(cv) = physics_loads.pop()
-                    && let Some(p_mesh) = physics_meshes.get_mut(&cv)
-                    && p_mesh.state == PhysicsMeshState::MeshNeeded
-                    && let Some(world_chunk) = grid_lock.get(cv)
-                    && world_chunk.is_stable()
-                {
-                    p_mesh.state = PhysicsMeshState::Meshing;
-                    let chunk = Box::new(world_chunk.chunk.clone());
-                    physics_mesh_task::<V>(cv, chunk, &t_sx, &compute_pool);
-                }
+                // while let Some(cv) = physics_loads.pop()
+                //     && let Some(p_mesh) = physics_meshes.get_mut(&cv)
+                //     && p_mesh.state == PhysicsMeshState::MeshNeeded
+                //     && let Some(world_chunk) = grid_lock.get(cv)
+                //     && world_chunk.is_stable()
+                // {
+                //     p_mesh.state = PhysicsMeshState::Meshing;
+                //     let chunk = Box::new(world_chunk.chunk.clone());
+                //     physics_mesh_task::<V>(cv, chunk, &t_sx, &thread_pool);
+                // }
 
                 let drain_limit = 50;
                 for _ in 0..drain_limit {
@@ -514,7 +710,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                         && let Some(world_chunk) = grid_lock.get_mut(task.cv)
                     {
                         world_chunk.state = PipelineState::Loading;
-                        load_task::<V>(task.cv, &chunk_store, &generator, &t_sx, &compute_pool);
+                        load_task::<V>(task.cv, &chunk_store, &generator, &t_sx, &thread_pool);
                     }
 
                     while let Some(task) = mesh_tasks.pop() {
@@ -545,7 +741,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                                 boxed_chunk,
                                 neighbor_chunks,
                                 &t_sx,
-                                &compute_pool,
+                                &thread_pool,
                             );
 
                             break;

@@ -4,10 +4,9 @@ extends CharacterBody3D
 @export var sprint_speed: float = 8.0
 @export var jump_velocity: float = 7.0
 @export var mouse_sensitivity: float = 0.15
-
 @export var air_acceleration: float = 10.0
-
 @export var gravity: float = -20.0
+@export var max_velocity: float = 50.0;
 
 @onready var camera_3d: Camera3D = $Camera3D
 @onready var torch_light = $TorchLight
@@ -60,5 +59,8 @@ func _physics_process(delta: float) -> void:
 	else:
 		velocity.x = move_toward(velocity.x, input_dir.x * current_speed, air_acceleration * delta)
 		velocity.z = move_toward(velocity.z, input_dir.z * current_speed, air_acceleration * delta)
+		
+	if velocity.length() > max_velocity:
+		velocity = velocity.normalized() * max_velocity
 
 	move_and_slide()

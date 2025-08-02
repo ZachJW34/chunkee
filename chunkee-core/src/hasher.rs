@@ -1,6 +1,6 @@
 use glam::IVec3;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{BuildHasherDefault, Hasher},
 };
 
@@ -51,6 +51,7 @@ impl Hasher for MortonHasher {
 
 pub type BuildMortonHasher = BuildHasherDefault<MortonHasher>;
 pub type VoxelHashMap<T> = HashMap<IVec3, T, BuildMortonHasher>;
+pub type VoxelHashSet = HashSet<IVec3, BuildMortonHasher>;
 
 // Example
 // =======================================================================

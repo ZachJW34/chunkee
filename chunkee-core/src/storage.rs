@@ -15,6 +15,8 @@ pub type BatchedPersistedChunkMap = VoxelHashMap<Option<PersistedChunk>>;
 
 pub struct ChunkStore {
     db: sled::Db,
+    deltas_tree: sled::Tree,
+    chunk_tree: sled::Tree,
     bincode_config: bincode::config::Configuration<BigEndian>,
 }
 
@@ -23,8 +25,18 @@ impl ChunkStore {
         let path = "./debug_saves";
         std::fs::create_dir_all(path).expect("Failed to create debug save directory");
 
+        let db = sled::open(path).expect("Failed to open sled db");
+        let deltas_tree = db
+            .open_tree("deltas")
+            .expect("Failed to create 'deltas' tree");
+        let chunk_tree = db
+            .open_tree("chunk")
+            .expect("Failed to create 'chunk' tree");
+
         ChunkStore {
-            db: sled::open(path).expect("Failed to open sled db"),
+            db,
+            deltas_tree,
+            chunk_tree,
             bincode_config: bincode::config::standard().with_big_endian(),
         }
     }
@@ -37,7 +49,7 @@ impl ChunkStore {
             let compressed = self.encode_compress(chunk);
             batch.insert(&key, compressed);
         }
-        self.db
+        self.deltas_tree
             .apply_batch(batch)
             .expect("Failed to apply batch save");
     }
@@ -48,39 +60,15 @@ impl ChunkStore {
 
     pub fn load_chunk(&self, cv: IVec3) -> Option<PersistedChunk> {
         let key = ivec3_to_key(cv);
-        self.db
+        self.deltas_tree
             .get(key)
             .expect("Failed to read deltas in KV store")
             .map(|compressed| self.decompress_decode(compressed))
     }
 
-    pub fn load_chunks_in_aabb(
-        &self,
-        min_corner: IVec3,
-        max_corner: IVec3,
-        dst: &mut BatchedPersistedChunkMap,
-    ) {
-        println!("min_corner: {min_corner} max_corner: {max_corner}");
-        for x in min_corner.x..=max_corner.x {
-            for y in min_corner.y..=max_corner.y {
-                let start_key = ivec3_to_key(IVec3::new(x, y, min_corner.z));
-                let end_key = ivec3_to_key(IVec3::new(x, y, max_corner.z));
-                let mut deltas_in_range: VoxelHashMap<PersistedChunk> = self
-                    .db
-                    .range(start_key..=end_key)
-                    .map(|result| {
-                        let (key, value) = result.expect("Failed to read from DB range scan");
-                        let coord = key_to_ivec3(&key);
-                        let persisted_chunk = self.decompress_decode(value);
-                        (coord, persisted_chunk)
-                    })
-                    .collect();
-
-                for z in min_corner.z..=max_corner.z {
-                    let cv = IVec3::new(x, y, z);
-                    dst.insert(cv, deltas_in_range.remove(&cv));
-                }
-            }
+    pub fn load_chunks(&self, chunks: &[ChunkVector], dst: &mut BatchedPersistedChunkMap) {
+        for &cv in chunks {
+            dst.insert(cv, self.load_chunk(cv));
         }
     }
 

@@ -9,14 +9,11 @@ use glam::{IVec3, Vec3};
 
 use crate::{
     block::{BLOCK_FACES, BlockFace, ChunkeeVoxel, Rotation, VoxelCollision, VoxelId},
-    chunk::ChunkLOD,
+    chunk::{CHUNK_SIDE_32, Chunk},
     coords::{ChunkVector, cv_to_wv},
 };
 
 type Shape34 = ConstShape3u32<34, 34, 34>;
-type Shape18 = ConstShape3u32<18, 18, 18>;
-type Shape10 = ConstShape3u32<10, 10, 10>;
-type Shape6 = ConstShape3u32<6, 6, 6>;
 
 #[derive(Debug)]
 pub struct ChunkMeshGroup {
@@ -129,12 +126,10 @@ impl<V: ChunkeeVoxel> MergeVoxel for MesherVoxel<V> {
 
 pub fn mesh_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    chunk: Box<ChunkLOD>,
-    neighbors: Box<[ChunkLOD; 6]>,
+    chunk: Box<Chunk>,
+    neighbors: Box<[Chunk; 6]>,
 ) -> ChunkMeshGroup {
-    let side = chunk.size();
-
-    let padded_side = side + 2;
+    let padded_side = CHUNK_SIDE_32 + 2;
     let padded_volume = padded_side * padded_side * padded_side;
     let mut padded_voxels = vec![VoxelId::AIR; padded_volume as usize];
 
@@ -147,45 +142,19 @@ pub fn mesh_chunk<V: ChunkeeVoxel>(
         )
     };
 
-    run_greedy_mesher(cv, side, mesher_voxels, chunk.lod_scale_factor())
+    run_greedy_mesher(cv, mesher_voxels)
 }
 
 fn run_greedy_mesher<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    side: i32,
     padded_voxels: &[MesherVoxel<V>],
-    lod_scale_factor: f32,
 ) -> ChunkMeshGroup {
-    match side {
-        32 => run_greedy_mesher_generic::<V, Shape34>(
-            cv,
-            padded_voxels,
-            lod_scale_factor,
-            &Shape34 {},
-        ),
-        16 => run_greedy_mesher_generic::<V, Shape18>(
-            cv,
-            padded_voxels,
-            lod_scale_factor,
-            &Shape18 {},
-        ),
-        8 => run_greedy_mesher_generic::<V, Shape10>(
-            cv,
-            padded_voxels,
-            lod_scale_factor,
-            &Shape10 {},
-        ),
-        4 => {
-            run_greedy_mesher_generic::<V, Shape6>(cv, padded_voxels, lod_scale_factor, &Shape6 {})
-        }
-        _ => panic!("Unsupported chunk size in mesher"),
-    }
+    run_greedy_mesher_generic::<V, Shape34>(cv, padded_voxels, &Shape34 {})
 }
 
 fn run_greedy_mesher_generic<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
     cv: ChunkVector,
     padded_voxels: &[MesherVoxel<V>],
-    lod_scale_factor: f32,
     shape: &S,
 ) -> ChunkMeshGroup {
     let mut buffer = GreedyQuadsBuffer::new(padded_voxels.len());
@@ -201,22 +170,21 @@ fn run_greedy_mesher_generic<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
         &mut buffer,
     );
 
-    build_mesh_from_quads::<V, S>(&buffer, padded_voxels, cv, lod_scale_factor)
+    build_mesh_from_quads::<V, S>(&buffer, padded_voxels, cv)
 }
 
 fn build_padded_buffer<V: ChunkeeVoxel>(
-    chunk: ChunkLOD,
-    neighbors: &[ChunkLOD; 6],
+    chunk: Chunk,
+    neighbors: &[Chunk; 6],
     padded_voxels: &mut [VoxelId],
 ) {
-    let side = chunk.size();
-    let padded_side = side + 2;
+    let padded_side = CHUNK_SIDE_32 + 2;
     let pos_to_idx =
         |p: IVec3| (p.x + p.y * padded_side + p.z * padded_side * padded_side) as usize;
 
-    for z in 0..side {
-        for y in 0..side {
-            for x in 0..side {
+    for z in 0..CHUNK_SIDE_32 {
+        for y in 0..CHUNK_SIDE_32 {
+            for x in 0..CHUNK_SIDE_32 {
                 let local_pos = IVec3::new(x, y, z);
                 let padded_pos = local_pos + 1;
                 padded_voxels[pos_to_idx(padded_pos)] = chunk.get_voxel(local_pos);
@@ -224,98 +192,25 @@ fn build_padded_buffer<V: ChunkeeVoxel>(
         }
     }
 
-    // 2. Fill the 1-voxel-thick border by sampling neighbors.
     for face in BLOCK_FACES {
         let neighbor_chunk = neighbors[face as usize];
-        let neighbor_side = neighbor_chunk.size();
 
-        // Nothing to do if neighbors are the same resolution.
-        // The logic handles this, but we can be explicit.
-        let ratio = side as f32 / neighbor_side as f32;
+        for i in 0..CHUNK_SIDE_32 {
+            for j in 0..CHUNK_SIDE_32 {
+                let (n_x, n_y, n_z, p_x, p_y, p_z) = match face {
+                    BlockFace::Right => (0, j, i, CHUNK_SIDE_32 + 1, j + 1, i + 1),
+                    BlockFace::Left => (CHUNK_SIDE_32 - 1, j, i, 0, j + 1, i + 1),
+                    BlockFace::Top => (i, 0, j, i + 1, CHUNK_SIDE_32 + 1, j + 1),
+                    BlockFace::Bottom => (i, CHUNK_SIDE_32 - 1, j, i + 1, 0, j + 1),
+                    BlockFace::Back => (i, j, 0, i + 1, j + 1, CHUNK_SIDE_32 + 1),
+                    BlockFace::Front => (i, j, CHUNK_SIDE_32 - 1, i + 1, j + 1, 0),
+                };
 
-        if ratio < 1.0 {
-            // --- DOWNSAMPLING (e.g., 16-chunk samples 32-neighbor) ---
-            // This is the critical path where we need conservative sampling, otherwise
-            // we might choose a solid voxel out of set that might contain air, causing missing faces
-            let step = (1.0 / ratio).round() as i32; // e.g., 2 for 16->32
+                let neighbor_pos = IVec3::new(n_x, n_y, n_z);
+                let padded_pos = IVec3::new(p_x, p_y, p_z);
 
-            for i in 0..side {
-                for j in 0..side {
-                    let base_ni = (i as f32 / ratio) as i32;
-                    let base_nj = (j as f32 / ratio) as i32;
-
-                    let mut representative_voxel = VoxelId::AIR;
-
-                    // Check the entire NxN block in the higher-res neighbor
-                    for dy in 0..step {
-                        for dx in 0..step {
-                            let ni = base_ni + dx;
-                            let nj = base_nj + dy;
-
-                            let (n_x, n_y, n_z) = match face {
-                                BlockFace::Right => (0, nj, ni),
-                                BlockFace::Left => (neighbor_side - 1, nj, ni),
-                                BlockFace::Top => (ni, 0, nj),
-                                BlockFace::Bottom => (ni, neighbor_side - 1, nj),
-                                BlockFace::Back => (ni, nj, 0),
-                                BlockFace::Front => (ni, nj, neighbor_side - 1),
-                            };
-
-                            let neighbor_pos = IVec3::new(n_x, n_y, n_z);
-                            let current_voxel = neighbor_chunk.get_voxel(neighbor_pos);
-
-                            // If it's the first voxel, store it as the potential solid representative
-                            if dx == 0 && dy == 0 {
-                                representative_voxel = current_voxel;
-                            }
-
-                            // If ANY voxel in the sample area is empty, we MUST treat the whole area as empty.
-                            let voxel_type = V::from(current_voxel.type_id());
-                            if matches!(
-                                voxel_type.visibilty(),
-                                VoxelVisibility::Empty | VoxelVisibility::Translucent
-                            ) {
-                                representative_voxel = VoxelId::AIR;
-                                break;
-                            }
-                        }
-                    }
-
-                    let (p_x, p_y, p_z) = match face {
-                        BlockFace::Right => (side + 1, j + 1, i + 1),
-                        BlockFace::Left => (0, j + 1, i + 1),
-                        BlockFace::Top => (i + 1, side + 1, j + 1),
-                        BlockFace::Bottom => (i + 1, 0, j + 1),
-                        BlockFace::Back => (i + 1, j + 1, side + 1),
-                        BlockFace::Front => (i + 1, j + 1, 0),
-                    };
-
-                    let padded_pos = IVec3::new(p_x, p_y, p_z);
-                    padded_voxels[pos_to_idx(padded_pos)] = representative_voxel;
-                }
-            }
-        } else {
-            // --- UPSAMPLING or SAME RESOLUTION ---
-            for i in 0..side {
-                for j in 0..side {
-                    let ni = (i as f32 / ratio).floor() as i32;
-                    let nj = (j as f32 / ratio).floor() as i32;
-
-                    let (n_x, n_y, n_z, p_x, p_y, p_z) = match face {
-                        BlockFace::Right => (0, nj, ni, side + 1, j + 1, i + 1),
-                        BlockFace::Left => (neighbor_side - 1, nj, ni, 0, j + 1, i + 1),
-                        BlockFace::Top => (ni, 0, nj, i + 1, side + 1, j + 1),
-                        BlockFace::Bottom => (ni, neighbor_side - 1, nj, i + 1, 0, j + 1),
-                        BlockFace::Back => (ni, nj, 0, i + 1, j + 1, side + 1),
-                        BlockFace::Front => (ni, nj, neighbor_side - 1, i + 1, j + 1, 0),
-                    };
-
-                    let neighbor_pos = IVec3::new(n_x, n_y, n_z);
-                    let padded_pos = IVec3::new(p_x, p_y, p_z);
-
-                    let voxel = neighbor_chunk.get_voxel(neighbor_pos);
-                    padded_voxels[pos_to_idx(padded_pos)] = voxel;
-                }
+                let voxel = neighbor_chunk.get_voxel(neighbor_pos);
+                padded_voxels[pos_to_idx(padded_pos)] = voxel;
             }
         }
     }
@@ -325,7 +220,6 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
     buffer: &GreedyQuadsBuffer,
     padded_voxels: &[MesherVoxel<V>],
     cv: ChunkVector,
-    lod_scale_factor: f32,
 ) -> ChunkMeshGroup {
     let chunk_offset = cv_to_wv(cv).to_array().map(|s| s as f32);
     let num_quads = buffer.quads.num_quads();
@@ -367,19 +261,13 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
                 &mut translucent
             };
 
-            process_quad(
-                mesh,
-                quad,
-                face,
-                chunk_offset,
-                lod_scale_factor,
-                voxel,
-                rotation,
-            );
+            process_quad(mesh, quad, face, chunk_offset, voxel, rotation);
         }
     }
 
+    optimize_mesh(&mut opaque);
     generate_tangents(&mut opaque);
+    optimize_mesh(&mut translucent);
     generate_tangents(&mut translucent);
 
     ChunkMeshGroup {
@@ -388,12 +276,42 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
     }
 }
 
+fn optimize_mesh(mesh_data: &mut ChunkMeshData) {
+    if mesh_data.indices.is_empty() {
+        return;
+    }
+
+    let num_vertices = mesh_data.positions.len();
+
+    meshopt::optimize_vertex_cache_in_place(&mut mesh_data.indices, num_vertices);
+
+    let positions_adapter = meshopt::VertexDataAdapter::new(
+        bytemuck::cast_slice(&mesh_data.positions),
+        std::mem::size_of::<[f32; 3]>(),
+        0,
+    )
+    .unwrap();
+
+    meshopt::optimize_overdraw_in_place(&mut mesh_data.indices, &positions_adapter, 1.05);
+
+    let remap_table = meshopt::optimize_vertex_fetch_remap(&mesh_data.indices, num_vertices);
+
+    mesh_data.positions =
+        meshopt::remap_vertex_buffer(&mesh_data.positions, num_vertices, &remap_table);
+    mesh_data.normals =
+        meshopt::remap_vertex_buffer(&mesh_data.normals, num_vertices, &remap_table);
+    mesh_data.uvs = meshopt::remap_vertex_buffer(&mesh_data.uvs, num_vertices, &remap_table);
+    mesh_data.layers = meshopt::remap_vertex_buffer(&mesh_data.layers, num_vertices, &remap_table);
+
+    mesh_data.indices =
+        meshopt::remap_index_buffer(Some(&mesh_data.indices), num_vertices, &remap_table);
+}
+
 fn process_quad<V: ChunkeeVoxel>(
     mesh_data: &mut ChunkMeshData,
     quad: &UnorientedQuad,
     face: &OrientedBlockFace,
     chunk_offset: [f32; 3],
-    lod_scale_factor: f32,
     voxel: V,
     rotation: Rotation,
 ) {
@@ -403,11 +321,11 @@ fn process_quad<V: ChunkeeVoxel>(
     new_indices.swap(4, 5);
 
     // positions
-    let mut new_positions = face.quad_mesh_positions(quad, lod_scale_factor);
+    let mut new_positions = face.quad_mesh_positions(quad, 1.0);
 
-    let chunk_offset_vec = glam::Vec3::from(chunk_offset);
+    let chunk_offset_vec = Vec3::from(chunk_offset);
     for v in &mut new_positions {
-        let scaled_local_pos = glam::Vec3::from(*v) - glam::Vec3::splat(lod_scale_factor);
+        let scaled_local_pos = Vec3::from(*v) - Vec3::ONE;
         *v = (scaled_local_pos + chunk_offset_vec).to_array();
     }
 
@@ -458,16 +376,16 @@ impl<V: ChunkeeVoxel> MergeVoxel for PhysicsMesherVoxel<V> {
     }
 }
 
-pub fn mesh_physics_chunk<V: ChunkeeVoxel>(cv: ChunkVector, chunk: Box<ChunkLOD>) -> Vec<Vec3> {
-    let padded_side = 32 + 2;
+pub fn mesh_physics_chunk<V: ChunkeeVoxel>(cv: ChunkVector, chunk: Box<Chunk>) -> Vec<Vec3> {
+    let padded_side = CHUNK_SIDE_32 + 2;
     let padded_volume = padded_side * padded_side * padded_side;
     let mut padded_voxels = vec![VoxelId::AIR; padded_volume as usize];
     let pos_to_idx =
         |p: IVec3| (p.x + p.y * padded_side + p.z * padded_side * padded_side) as usize;
 
-    for z in 0..32 {
-        for y in 0..32 {
-            for x in 0..32 {
+    for z in 0..CHUNK_SIDE_32 {
+        for y in 0..CHUNK_SIDE_32 {
+            for x in 0..CHUNK_SIDE_32 {
                 let local_pos = IVec3::new(x, y, z);
                 let padded_pos = local_pos + 1;
                 padded_voxels[pos_to_idx(padded_pos)] = chunk.get_voxel(local_pos);

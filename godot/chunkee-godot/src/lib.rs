@@ -2,13 +2,15 @@ mod conversions;
 mod generator;
 mod voxels;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chunkee_core::{
     coords::WorldVector,
+    define_metrics,
     glam::{IVec3, Vec3},
     hasher::VoxelHashMap,
     meshing::ChunkMeshData,
+    metrics::Metrics,
     streaming::should_unload,
     world::{ChunkeeWorld, ChunkeeWorldConfig, VoxelRaycast},
 };
@@ -41,22 +43,22 @@ pub struct ChunkeeWorldNode {
     physics_debug_meshes: VoxelHashMap<Gd<MeshInstance3D>>,
     voxel_hit: Option<(WorldVector, MyVoxels)>,
     outline_node: Option<Gd<MeshInstance3D>>,
+    metrics: Metrics<RenderMetrics>,
 
+    pub show_physics_debug_mesh: bool,
     #[export]
     pub opaque_material: Option<Gd<ShaderMaterial>>,
     #[export]
     pub translucent_material: Option<Gd<ShaderMaterial>>,
-    #[export]
-    pub show_physics_debug_mesh: bool,
 }
 
 #[godot_api]
 impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
+        env_logger::init();
         println!("Initializing ChunkeeWorldNode");
         let config = ChunkeeWorldConfig {
-            radius_xz: 8,
-            radius_y: 8,
+            radius: 8,
             generator: Box::new(WorldGenerator::new()),
         };
         let voxel_world: ChunkeeWorld<MyVoxels> = ChunkeeWorld::new(config);
@@ -72,6 +74,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
             voxel_hit: None,
             outline_node: None,
             show_physics_debug_mesh: false,
+            metrics: Metrics::new(Duration::from_secs(2)),
         }
     }
 
@@ -108,7 +111,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
                 VoxelRaycast::None => {}
             }
 
-            if input.is_key_pressed(Key::ENTER)
+            if input.is_action_pressed("break_block")
                 && let Some(hit) = self.voxel_hit.as_ref()
             {
                 let radius = 10;
@@ -130,22 +133,26 @@ impl IStaticBody3D for ChunkeeWorldNode {
                 self.voxel_world.set_voxels_at(&sphere_removals);
             }
 
+            self.render(camera_pos, self.voxel_world.radius);
+
+            self.metrics.batch_print();
+        } else {
+            println!("Cannot update without camera")
+        }
+    }
+
+    fn physics_process(&mut self, _delta: f64) {
+        if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
+            let camera_pos = Vec3::from_array(camera.get_global_position().to_array());
+
             let mut entities = Vec::new();
             entities.push(chunkee_core::pipeline::PhysicsEntity {
                 id: camera.instance_id().to_i64(),
                 pos: camera_pos,
             });
 
-            // TODO: Move to physics_process
             self.voxel_world.update_physics_entities(entities);
-
-            self.render(
-                camera_pos,
-                self.voxel_world.radius_xz,
-                self.voxel_world.radius_y,
-            );
-        } else {
-            println!("Cannot update without camera")
+            self.process_physics_meshes();
         }
     }
 }
@@ -165,9 +172,15 @@ const ARRAY_CUSTOM0: usize = 6;
 const ARRAY_INDEX: usize = 12;
 const ARRAY_MAX: usize = 13;
 
+define_metrics! {
+  enum RenderMetrics {
+      ChunkMeshRender => "Render::ChunkMesh",
+  }
+}
+
 #[godot_api]
 impl ChunkeeWorldNode {
-    fn render(&mut self, camera_pos: Vec3, radius_xz: u32, radius_y: u32) {
+    fn render(&mut self, camera_pos: Vec3, radius: u32) {
         // let render_time = Instant::now();
         let array_format = ArrayFormat::VERTEX
             | ArrayFormat::NORMAL
@@ -177,10 +190,8 @@ impl ChunkeeWorldNode {
             | ArrayFormat::CUSTOM0
             | ArrayFormat::from_ord(4 << ArrayFormat::CUSTOM0_SHIFT.ord());
 
-        let filter_time = Instant::now();
-
         self.rendered_chunks.retain(|cv, node| {
-            if should_unload(*cv, camera_pos, radius_xz, radius_y) {
+            if should_unload(*cv, camera_pos, radius) {
                 node.queue_free();
                 false
             } else {
@@ -188,13 +199,11 @@ impl ChunkeeWorldNode {
             }
         });
 
-        let filter_time = filter_time.elapsed();
-
         if let (Some(opaque_material), Some(translucent_material)) = (
             &self.opaque_material.clone(),
             &self.translucent_material.clone(),
         ) {
-            let time = Instant::now();
+            let mesh_render_time = Instant::now();
             let mesh_queue_len = self.voxel_world.mesh_queue.len();
             let drain_limit = 100;
 
@@ -230,11 +239,9 @@ impl ChunkeeWorldNode {
             }
 
             if mesh_queue_len > 0 {
-                println!(
-                    "Render time ({mesh_queue_len}): t={:?} | Filter time: t={:?}",
-                    time.elapsed(),
-                    filter_time
-                );
+                self.metrics
+                    .get_mut(RenderMetrics::ChunkMeshRender)
+                    .record(mesh_render_time.elapsed());
             }
 
             if let Some(outline_node) = self.outline_node.as_mut() {
@@ -246,46 +253,47 @@ impl ChunkeeWorldNode {
                     outline_node.set_visible(false);
                 }
             }
-
-            // TODO: Move to physics_process
-            let physics_load_limit = 10;
-            for _ in 0..physics_load_limit {
-                if self.voxel_world.physics_mesh_queue.is_empty() {
-                    break;
-                }
-
-                let (cv, triangles) = self.voxel_world.physics_mesh_queue.pop().unwrap();
-
-                // --- Debug Visualization Mesh ---
-                let mut debug_mesh_instance = build_physics_debug_mesh(triangles.clone());
-                debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
-                self.base_mut().add_child(&debug_mesh_instance);
-                if let Some(mut old_debug_mesh) =
-                    self.physics_debug_meshes.insert(cv, debug_mesh_instance)
-                {
-                    old_debug_mesh.queue_free();
-                }
-                // ---------------------------------------
-
-                let collision_shape_node = build_physics_mesh(triangles);
-                self.base_mut().add_child(&collision_shape_node);
-                if let Some(mut old_col) = self.physics_chunks.insert(cv, collision_shape_node) {
-                    old_col.queue_free();
-                }
-            }
-
-            while let Some(cv) = self.voxel_world.physics_mesh_unload_queue.pop() {
-                if let Some(mut shape_to_remove) = self.physics_chunks.remove(&cv) {
-                    shape_to_remove.queue_free();
-                }
-
-                if let Some(mut debug_mesh_to_remove) = self.physics_debug_meshes.remove(&cv) {
-                    debug_mesh_to_remove.queue_free();
-                }
-            }
         }
 
         // println!("Total Render time: {:?}", render_time.elapsed());
+    }
+
+    fn process_physics_meshes(&mut self) {
+        let physics_load_limit = 10;
+        for _ in 0..physics_load_limit {
+            if self.voxel_world.physics_mesh_queue.is_empty() {
+                break;
+            }
+
+            let (cv, triangles) = self.voxel_world.physics_mesh_queue.pop().unwrap();
+
+            // --- Debug Visualization Mesh ---
+            let mut debug_mesh_instance = build_physics_debug_mesh(triangles.clone());
+            debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
+            self.base_mut().add_child(&debug_mesh_instance);
+            if let Some(mut old_debug_mesh) =
+                self.physics_debug_meshes.insert(cv, debug_mesh_instance)
+            {
+                old_debug_mesh.queue_free();
+            }
+            // ---------------------------------------
+
+            let collision_shape_node = build_physics_mesh(triangles);
+            self.base_mut().add_child(&collision_shape_node);
+            if let Some(mut old_col) = self.physics_chunks.insert(cv, collision_shape_node) {
+                old_col.queue_free();
+            }
+        }
+
+        while let Some(cv) = self.voxel_world.physics_mesh_unload_queue.pop() {
+            if let Some(mut shape_to_remove) = self.physics_chunks.remove(&cv) {
+                shape_to_remove.queue_free();
+            }
+
+            if let Some(mut debug_mesh_to_remove) = self.physics_debug_meshes.remove(&cv) {
+                debug_mesh_to_remove.queue_free();
+            }
+        }
     }
 }
 

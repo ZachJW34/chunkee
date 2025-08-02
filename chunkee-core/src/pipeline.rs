@@ -1,8 +1,9 @@
 use std::{
     cmp::Ordering,
-    collections::{BinaryHeap, HashSet},
-    sync::Arc,
+    collections::BinaryHeap,
+    sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -10,43 +11,32 @@ use glam::{IVec3, Vec3};
 
 use crate::{
     block::{BLOCK_FACES, ChunkeeVoxel, VoxelId},
-    chunk::{Chunk, ChunkLOD, LOD},
-    coords::{
-        AABB, ChunkVector, NEIGHBOR_OFFSETS, camera_vec3_to_cv, cv_to_wv, wv_to_cv, wv_to_lv,
-    },
+    chunk::Chunk,
+    coords::{ChunkVector, NEIGHBOR_OFFSETS, camera_vec3_to_cv, cv_to_wv, wv_to_cv, wv_to_lv},
+    define_metrics,
     generation::VoxelGenerator,
-    grid::{Deltas, GridOp, PipelineState, WorldChunk, neighbors_of},
-    hasher::VoxelHashMap,
+    grid::{Deltas, GridOp, PhysicsMeshState, PipelineState, WorldChunk, neighbors_of},
     meshing::{ChunkMeshGroup, mesh_chunk, mesh_physics_chunk},
-    storage::{BatchedPersistedChunkMap, ChunkStore, PersistedChunk},
-    streaming::{CameraData, calc_lod, calculate_chunk_priority},
+    metrics::Metrics,
+    storage::{ChunkStore, PersistedChunk},
+    streaming::{CameraData, calculate_chunk_priority},
     world::WorldGrid,
 };
+
+define_metrics! {
+    pub enum PipelineMetrics {
+        PipelineLoop => "Pipeline::loop",
+        GridUpdate => "Grid::update",
+        IoTask => "Task::IO",
+        GenerationTask => "Task::Generation",
+        MeshTask => "Task::Mesh",
+        PhysicsTask => "Task::Physics",
+    }
+}
 
 pub struct PhysicsEntity {
     pub id: i64,
     pub pos: Vec3,
-}
-
-#[derive(PartialEq)]
-pub enum PhysicsMeshState {
-    MeshNeeded,
-    Meshing,
-    MeshReady,
-}
-
-pub struct PhysicsMesh {
-    dependents: u32,
-    state: PhysicsMeshState,
-}
-
-impl PhysicsMesh {
-    fn new() -> Self {
-        Self {
-            dependents: 0,
-            state: PhysicsMeshState::MeshNeeded,
-        }
-    }
 }
 
 pub enum PipelineMessage {
@@ -74,25 +64,6 @@ pub enum PipelineResult {
     EditsApplied(Vec<(IVec3, VoxelId)>),
 }
 
-enum TaskResult {
-    PersistedChunksLoaded {
-        persisted_chunks: BatchedPersistedChunkMap,
-    },
-    GenerationComplete {
-        cv: ChunkVector,
-        chunk_lod: ChunkLOD,
-        uniform_voxel_id: Option<VoxelId>,
-    },
-    MeshComplete {
-        cv: ChunkVector,
-        mesh: ChunkMeshGroup,
-    },
-    PhysicsMeshComplete {
-        cv: ChunkVector,
-        mesh: Vec<Vec3>,
-    },
-}
-
 #[derive(Debug, Clone)]
 pub struct WorkItem {
     pub priority: u32,
@@ -116,7 +87,111 @@ impl Ord for WorkItem {
     }
 }
 
-pub type WorkQueue = BinaryHeap<WorkItem>;
+struct WorkQueues {
+    load: BinaryHeap<WorkItem>,
+    mesh: BinaryHeap<WorkItem>,
+    physics: BinaryHeap<WorkItem>,
+}
+
+struct WorkerPool;
+
+impl WorkerPool {
+    fn new<V: 'static + ChunkeeVoxel>(
+        num_threads: usize,
+        work_queues: Arc<Mutex<WorkQueues>>,
+        cvar: Arc<Condvar>,
+        world_grid: WorldGrid,
+        chunk_store: Arc<ChunkStore>,
+        generator: Arc<Box<dyn VoxelGenerator>>,
+        result_sender: Sender<PipelineResult>,
+    ) {
+        for _ in 0..num_threads {
+            let work_queues = Arc::clone(&work_queues);
+            let cvar = Arc::clone(&cvar);
+            let world_grid = Arc::clone(&world_grid);
+            let chunk_store = Arc::clone(&chunk_store);
+            let generator = Arc::clone(&generator);
+            let result_sender = result_sender.clone();
+
+            thread::spawn(move || {
+                Self::worker_loop::<V>(
+                    work_queues,
+                    cvar,
+                    world_grid,
+                    chunk_store,
+                    generator,
+                    result_sender,
+                );
+            });
+        }
+    }
+
+    fn worker_loop<V: 'static + ChunkeeVoxel>(
+        work_queues: Arc<Mutex<WorkQueues>>,
+        cvar: Arc<Condvar>,
+        world_grid: WorldGrid,
+        chunk_store: Arc<ChunkStore>,
+        generator: Arc<Box<dyn VoxelGenerator>>,
+        result_sender: Sender<PipelineResult>,
+    ) {
+        loop {
+            let next_physics_mesh = work_queues.lock().unwrap().physics.pop();
+            if let Some(work_item) = next_physics_mesh {
+                let cv = work_item.cv;
+
+                if let Some(mesh) = physics_mesh_task::<V>(cv, &world_grid) {
+                    if !mesh.is_empty() {
+                        result_sender
+                            .send(PipelineResult::PhysicsMeshReady { cv: cv, mesh })
+                            .ok();
+                    }
+
+                    cvar.notify_one();
+                    continue;
+                } else {
+                    if let Some(world_chunk) = world_grid.write().unwrap().get_mut(cv)
+                        && world_chunk.physics_state == PhysicsMeshState::Meshing
+                    {
+                        world_chunk.physics_state = PhysicsMeshState::MeshNeeded;
+                    }
+                }
+            }
+
+            let next_mesh_item = work_queues.lock().unwrap().mesh.pop();
+            if let Some(work_item) = next_mesh_item {
+                let cv = work_item.cv;
+
+                if let Some(mesh) = mesh_task::<V>(cv, &world_grid) {
+                    if !mesh.opaque.indices.is_empty() || !mesh.translucent.indices.is_empty() {
+                        result_sender
+                            .send(PipelineResult::MeshReady { cv: cv, mesh })
+                            .ok();
+                    }
+
+                    cvar.notify_one();
+                    continue;
+                } else {
+                    if let Some(world_chunk) = world_grid.write().unwrap().get_mut(cv)
+                        && world_chunk.state == PipelineState::Meshing
+                    {
+                        world_chunk.state = PipelineState::MeshNeeded;
+                    }
+                }
+            }
+
+            let next_load_item = work_queues.lock().unwrap().load.pop();
+            if let Some(work_item) = next_load_item {
+                let cv = work_item.cv;
+                if let Some(_) = load_task::<V>(cv, &world_grid, &chunk_store, &generator) {
+                    cvar.notify_one();
+                    continue;
+                }
+            } else {
+                cvar.wait(work_queues.lock().unwrap()).ok();
+            }
+        }
+    }
+}
 
 pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
     world_grid: WorldGrid,
@@ -126,37 +201,52 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
     result_sender: Sender<PipelineResult>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
+        let mut metrics = Metrics::<PipelineMetrics>::new(Duration::from_secs(2));
         let mut camera_data: Option<CameraData> = None;
-
-        let (t_sx, t_rx) = crossbeam_channel::unbounded::<TaskResult>();
-
-        let io_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
-        let compute_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
-
+        let thread_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
         let mut previous_physics_entities: Vec<PhysicsEntity> = vec![];
-        let mut physics_meshes: VoxelHashMap<PhysicsMesh> = Default::default();
+
+        let cvar = Arc::new(Condvar::new());
+        let work_queues = Arc::new(Mutex::new(WorkQueues {
+            load: BinaryHeap::new(),
+            mesh: BinaryHeap::new(),
+            physics: BinaryHeap::new(),
+        }));
+
+        WorkerPool::new::<V>(
+            12,
+            work_queues.clone(),
+            cvar.clone(),
+            world_grid.clone(),
+            chunk_store.clone(),
+            generator.clone(),
+            result_sender.clone(),
+        );
 
         loop {
+            metrics.batch_print();
+            let loop_time = Instant::now();
             let mut camera_moved = false;
             for message in message_receiver.try_iter() {
                 match message {
                     PipelineMessage::Shutdown => return,
-                    PipelineMessage::CameraDataUpdate(cd) => {
-                        if camera_data
-                            .as_ref()
-                            .map_or(true, |old_cd| old_cd.pos != cd.pos)
-                        {
+                    PipelineMessage::CameraDataUpdate(new_camera_data) => {
+                        if camera_data.as_ref().map_or(true, |old_camera_data| {
+                            old_camera_data.pos != new_camera_data.pos
+                        }) {
                             camera_moved = true;
                         }
-                        camera_data.replace(cd);
+                        camera_data.replace(new_camera_data);
                     }
                     PipelineMessage::PhysicsEntitiesUpdate(new_entities) => {
+                        let mut grid = world_grid.write().unwrap();
                         for entity in &previous_physics_entities {
                             let cv = camera_vec3_to_cv(entity.pos);
                             for offset in NEIGHBOR_OFFSETS {
                                 let neighbor_cv = offset + cv;
-                                if let Some(p_mesh) = physics_meshes.get_mut(&neighbor_cv) {
-                                    p_mesh.dependents = p_mesh.dependents.saturating_sub(1);
+                                if let Some(chunk) = grid.get_mut(neighbor_cv) {
+                                    chunk.physics_dependents =
+                                        chunk.physics_dependents.saturating_sub(1);
                                 }
                             }
                         }
@@ -165,56 +255,43 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                             let cv = camera_vec3_to_cv(entity.pos);
                             for offset in NEIGHBOR_OFFSETS {
                                 let neighbor_cv = offset + cv;
-                                let p_mesh = physics_meshes
-                                    .entry(neighbor_cv)
-                                    .or_insert(PhysicsMesh::new());
-                                p_mesh.dependents += 1;
+                                if let Some(chunk) = grid.get_mut(neighbor_cv) {
+                                    chunk.physics_dependents += 1;
+                                }
                             }
                         }
 
                         previous_physics_entities = new_entities;
                     }
                     PipelineMessage::ChunkEdits(edits) => {
-                        let mut grid_lock = world_grid.write().unwrap();
                         let mut applied_edits = Vec::with_capacity(edits.len());
+                        let mut grid = world_grid.write().unwrap();
                         for (wv, voxel_id) in edits {
                             let cv = wv_to_cv(wv);
-                            if let Some(world_chunk) = grid_lock.get_mut(cv)
-                                && world_chunk.is_stable()
-                                && world_chunk.chunk_lod.lod_level() == 1
-                            {
-                                let lv = wv_to_lv(wv);
-                                world_chunk.deltas.0.insert(lv, voxel_id);
-                                let old_voxel_id =
-                                    world_chunk.chunk_lod.set_voxel::<V>(lv, voxel_id);
-                                world_chunk.is_dirty = true;
-                                world_chunk.state = PipelineState::MeshNeeded;
-                                world_chunk.priority = 0; // High priority
-
-                                if let Some(p_mesh) = physics_meshes.get_mut(&cv)
-                                    && p_mesh.state != PhysicsMeshState::MeshNeeded
-                                {
-                                    p_mesh.state = PhysicsMeshState::MeshNeeded;
+                            if let Some(world_chunk) = grid.get_mut(cv) {
+                                if !world_chunk.is_stable() {
+                                    continue;
                                 }
 
-                                if world_chunk.chunk_lod.is_voxel_on_edge(lv) {
-                                    for neighbor_cv in neighbors_of(cv) {
-                                        if let Some(neighbor) = grid_lock.get_mut(neighbor_cv) {
-                                            neighbor.state = PipelineState::MeshNeeded;
-                                            neighbor.priority = 0;
+                                let lv = wv_to_lv(wv);
+                                world_chunk.deltas.0.insert(lv, voxel_id);
+                                let old_voxel_id = world_chunk.chunk.set_voxel::<V>(lv, voxel_id);
+                                world_chunk.is_dirty = true;
+                                world_chunk.state = PipelineState::MeshNeeded;
+                                world_chunk.physics_state = PhysicsMeshState::MeshNeeded;
 
-                                            if let Some(p_mesh) =
-                                                physics_meshes.get_mut(&neighbor_cv)
-                                                && p_mesh.state != PhysicsMeshState::MeshNeeded
-                                            {
-                                                p_mesh.state = PhysicsMeshState::MeshNeeded;
-                                            }
+                                if world_chunk.chunk.is_voxel_on_edge(lv) {
+                                    for neighbor_cv in neighbors_of(cv) {
+                                        if let Some(neighbor) = grid.get_mut(neighbor_cv) {
+                                            neighbor.state = PipelineState::MeshNeeded;
+                                            neighbor.physics_state = PhysicsMeshState::MeshNeeded;
                                         }
                                     }
                                 }
                                 applied_edits.push((wv, old_voxel_id));
                             }
                         }
+
                         result_sender
                             .send(PipelineResult::EditsApplied(applied_edits))
                             .ok();
@@ -230,561 +307,240 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
             let camera_data = camera_data.as_ref().unwrap();
 
             if camera_moved {
-                let mut chunks_to_load = Vec::new();
                 let mut chunks_to_save = Vec::new();
-                let mut chunks_to_downsample = vec![];
+                let mut physics_unloads = Vec::new();
 
-                let mut grid_lock = world_grid.write().unwrap();
-                grid_lock.shift_and_remap(camera_data, |op| match op {
-                    GridOp::Recycle(world_chunk, cv) => {
-                        if world_chunk.is_dirty {
-                            let persisted_chunk = PersistedChunk {
-                                uniform_voxel_id: world_chunk.uniform_voxel_id.take(),
-                                deltas: world_chunk.deltas.clone(),
-                            };
-                            chunks_to_save.push((world_chunk.cv, persisted_chunk));
-                        }
-
-                        let lod = calc_lod(cv, camera_data.pos);
-                        let priority = calculate_chunk_priority(cv, camera_data);
-
-                        world_chunk.cv = cv;
-                        world_chunk.priority = priority;
-                        world_chunk.is_dirty = false;
-                        world_chunk.state = PipelineState::DeltasLoading;
-                        world_chunk.chunk_lod = ChunkLOD::new(lod);
-                        world_chunk.deltas = Deltas::default();
-                        world_chunk.uniform_voxel_id = None;
-
-                        chunks_to_load.push(cv);
-                    }
-                    GridOp::Keep(world_chunk) => {
-                        let cv = world_chunk.cv;
-                        let lod = calc_lod(cv, camera_data.pos);
-                        world_chunk.priority = calculate_chunk_priority(cv, camera_data);
-
-                        if world_chunk.is_stable() && world_chunk.chunk_lod.lod_level() < lod {
-                            chunks_to_downsample.push((cv, lod));
-                            return;
-                        }
-
-                        if world_chunk.chunk_lod.lod_level() != lod {
-                            world_chunk.chunk_lod = ChunkLOD::new(lod);
-                            if let Some(uniform) = world_chunk.uniform_voxel_id {
-                                world_chunk.chunk_lod = ChunkLOD::new_uniform(lod, uniform);
-                                world_chunk.merge_deltas::<V>();
-                                world_chunk.state = PipelineState::MeshNeeded;
-                            } else {
-                                world_chunk.state = PipelineState::GenerationNeeded;
+                let mut grid = world_grid.write().unwrap();
+                grid.update(
+                    camera_data,
+                    |op| match op {
+                        GridOp::Recycle(world_chunk, cv) => {
+                            if world_chunk.is_dirty {
+                                let persisted_chunk = PersistedChunk {
+                                    uniform_voxel_id: world_chunk.uniform_voxel_id.take(),
+                                    deltas: world_chunk.deltas.clone(),
+                                };
+                                chunks_to_save.push((world_chunk.cv, persisted_chunk));
                             }
-                        }
-                    }
-                });
 
-                drop(grid_lock);
+                            if world_chunk.physics_dependents > 0 {
+                                physics_unloads.push(world_chunk.cv);
+                            }
+
+                            world_chunk.reset(cv);
+                        } // GridOp::Keep(world_chunk) => {
+                          //     world_chunk.priority =
+                          //         calculate_chunk_priority(world_chunk.cv, camera_data);
+                          // }
+                    },
+                    &mut metrics,
+                );
+
+                drop(grid);
 
                 if !chunks_to_save.is_empty() {
-                    batch_unload_deltas_task(chunks_to_save, &chunk_store, &io_pool);
+                    batch_unload_deltas_task(chunks_to_save, &chunk_store, &thread_pool);
                 }
 
-                if !chunks_to_load.is_empty() {
-                    let aabbs = group_chunks_into_aabbs(chunks_to_load);
-                    batch_load_deltas_task(aabbs, &chunk_store, &t_sx, &io_pool);
-                }
-
-                let mut grid_lock = world_grid.write().unwrap();
-                for (cv, lod) in chunks_to_downsample {
-                    if let Some(world_chunk) = grid_lock.get_mut(cv) {
-                        let mut new_chunk_lod = ChunkLOD::new(lod);
-                        let size = new_chunk_lod.size();
-                        let step = (new_chunk_lod.lod_scale_factor()
-                            / world_chunk.chunk_lod.lod_scale_factor())
-                            as i32;
-
-                        for x in 0..size {
-                            for y in 0..size {
-                                for z in 0..size {
-                                    let lv_small = IVec3::new(x, y, z);
-                                    let lv_large = lv_small * step;
-
-                                    let sample = world_chunk.chunk_lod.get_voxel(lv_large);
-                                    new_chunk_lod.set_voxel::<V>(lv_small, sample);
-                                }
-                            }
-                        }
-
-                        world_chunk.chunk_lod = new_chunk_lod;
-                        world_chunk.state = PipelineState::MeshNeeded;
-                    }
+                if !physics_unloads.is_empty() {
+                    result_sender
+                        .send(PipelineResult::PhysicsMeshUnload {
+                            cvs: physics_unloads,
+                        })
+                        .ok();
                 }
             }
 
-            let results: Vec<_> = t_rx.try_iter().collect();
-
-            let (mut generate_tasks, mut mesh_tasks) = {
-                let grid_lock = world_grid.read().unwrap();
-                let mut gen_tasks = Vec::new();
+            let (load_tasks, mesh_tasks, physics_loads, physics_unloads) = {
+                let mut grid = world_grid.write().unwrap();
+                let mut load_tasks = Vec::new();
                 let mut mesh_tasks = Vec::new();
-                for world_chunk in grid_lock.chunks.iter() {
+                let mut physics_loads = Vec::new();
+                let mut physics_unloads = Vec::new();
+                for world_chunk in grid.flat.iter_mut() {
                     match world_chunk.state {
-                        PipelineState::GenerationNeeded => gen_tasks.push(WorkItem {
-                            priority: world_chunk.priority,
-                            cv: world_chunk.cv,
-                        }),
-                        PipelineState::MeshNeeded => mesh_tasks.push(WorkItem {
-                            priority: world_chunk.priority,
-                            cv: world_chunk.cv,
-                        }),
+                        PipelineState::LoadNeeded => {
+                            load_tasks.push(WorkItem {
+                                priority: calculate_chunk_priority(world_chunk.cv, camera_data),
+                                cv: world_chunk.cv,
+                            });
+                            world_chunk.state = PipelineState::Loading;
+                        }
+                        PipelineState::MeshNeeded => {
+                            mesh_tasks.push(WorkItem {
+                                priority: calculate_chunk_priority(world_chunk.cv, camera_data),
+                                cv: world_chunk.cv,
+                            });
+                            world_chunk.state = PipelineState::Meshing;
+                        }
                         _ => {}
                     }
+
+                    if world_chunk.physics_dependents > 0 {
+                        if world_chunk.physics_state == PhysicsMeshState::MeshNeeded
+                            && world_chunk.is_stable()
+                        {
+                            physics_loads.push(WorkItem {
+                                priority: 0, // physics has high priority
+                                cv: world_chunk.cv,
+                            });
+                            world_chunk.physics_state = PhysicsMeshState::Meshing;
+                        }
+                    } else {
+                        if world_chunk.physics_state == PhysicsMeshState::MeshReady {
+                            physics_unloads.push(world_chunk.cv);
+                            world_chunk.physics_state = PhysicsMeshState::MeshNeeded;
+                        }
+                    }
                 }
-                (gen_tasks, mesh_tasks)
+                (load_tasks, mesh_tasks, physics_loads, physics_unloads)
             };
 
-            generate_tasks.sort();
-            mesh_tasks.sort();
-
-            let mut physics_unloads = vec![];
-            let mut physics_loads = vec![];
-
-            physics_meshes.retain(|cv, p_mesh| {
-                if p_mesh.dependents == 0 {
-                    physics_unloads.push(*cv);
-                    return false;
-                }
-
-                if p_mesh.state == PhysicsMeshState::MeshNeeded {
-                    physics_loads.push(*cv);
-                }
-
-                true
-            });
-
-            result_sender
-                .send(PipelineResult::PhysicsMeshUnload {
-                    cvs: physics_unloads,
-                })
-                .ok();
-
-            let work_to_do = !results.is_empty()
-                || !generate_tasks.is_empty()
-                || !mesh_tasks.is_empty()
-                || !physics_loads.is_empty();
-
-            if work_to_do {
-                let mut grid_lock = world_grid.write().unwrap();
-
-                for result in results {
-                    match result {
-                        TaskResult::PersistedChunksLoaded { persisted_chunks } => {
-                            for (cv, persisted_chunk) in persisted_chunks {
-                                if let Some(world_chunk) = grid_lock.get_mut(cv) {
-                                    if world_chunk.state == PipelineState::DeltasLoading {
-                                        if let Some(pc) = persisted_chunk {
-                                            world_chunk.deltas = pc.deltas;
-                                            world_chunk.uniform_voxel_id = pc.uniform_voxel_id;
-                                        };
-                                        if let Some(uniform) = world_chunk.uniform_voxel_id {
-                                            let lod: u8 = world_chunk.chunk_lod.lod_level();
-                                            world_chunk.chunk_lod =
-                                                ChunkLOD::new_uniform(lod, uniform);
-                                            world_chunk.merge_deltas::<V>();
-                                            world_chunk.state = PipelineState::MeshNeeded;
-                                        } else {
-                                            world_chunk.state = PipelineState::GenerationNeeded;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        TaskResult::GenerationComplete {
-                            cv,
-                            chunk_lod,
-                            uniform_voxel_id,
-                        } => {
-                            let mut should_notify_neighbors = false;
-                            if let Some(world_chunk) = grid_lock.get_mut(cv)
-                                && world_chunk.state == PipelineState::Generating
-                            {
-                                should_notify_neighbors = true;
-                                world_chunk.chunk_lod = chunk_lod;
-                                if uniform_voxel_id.is_some() {
-                                    world_chunk.uniform_voxel_id = uniform_voxel_id;
-                                    world_chunk.is_dirty = true;
-                                }
-                                world_chunk.merge_deltas::<V>();
-                                world_chunk.state = PipelineState::MeshNeeded;
-                            }
-
-                            if should_notify_neighbors {
-                                for neighbor_cv in neighbors_of(cv) {
-                                    if let Some(neighbor) = grid_lock.get_mut(neighbor_cv)
-                                        && matches!(
-                                            neighbor.state,
-                                            PipelineState::MeshNeeded
-                                                | PipelineState::Meshing
-                                                | PipelineState::MeshReady
-                                        )
-                                    {
-                                        neighbor.state = PipelineState::MeshNeeded;
-                                    }
-                                }
-                            }
-                        }
-                        TaskResult::MeshComplete { cv, mesh } => {
-                            if let Some(world_chunk) = grid_lock.get_mut(cv)
-                                && world_chunk.state == PipelineState::Meshing
-                            {
-                                world_chunk.state = PipelineState::MeshReady;
-                                result_sender
-                                    .send(PipelineResult::MeshReady { cv, mesh })
-                                    .ok();
-                            }
-                        }
-                        TaskResult::PhysicsMeshComplete { cv, mesh } => {
-                            if let Some(p_mesh) = physics_meshes.get_mut(&cv)
-                                && p_mesh.state == PhysicsMeshState::Meshing
-                            {
-                                p_mesh.state = PhysicsMeshState::MeshReady;
-                                result_sender
-                                    .send(PipelineResult::PhysicsMeshReady { cv, mesh })
-                                    .ok();
-                            }
-                        }
-                    }
-                }
-
-                let drain_limit = 100;
-                for _ in 0..drain_limit {
-                    if generate_tasks.is_empty()
-                        && mesh_tasks.is_empty()
-                        && physics_loads.is_empty()
-                    {
-                        break;
-                    }
-
-                    if let Some(task) = generate_tasks.pop() {
-                        if let Some(world_chunk) = grid_lock.get_mut(task.cv) {
-                            world_chunk.state = PipelineState::Generating;
-                            let lod = world_chunk.chunk_lod.lod_level();
-                            generate_task(task.cv, &generator, &t_sx, &compute_pool, lod);
-                        }
-                    }
-
-                    while let Some(task) = mesh_tasks.pop() {
-                        let neighbors: [Option<&WorldChunk>; 6] = std::array::from_fn(|idx| {
-                            grid_lock.get(task.cv + BLOCK_FACES[idx].into_normal())
-                        });
-
-                        let not_all_stable = neighbors
-                            .iter()
-                            .any(|op| op.is_some_and(|wc| !wc.is_stable()));
-
-                        if not_all_stable {
-                            continue;
-                        }
-
-                        let mut neighbor_lods: Box<[Option<ChunkLOD>; 6]> = Box::new([None; 6]);
-                        for (i, maybe_chunk) in neighbors.iter().enumerate() {
-                            if let Some(world_chunk) = maybe_chunk {
-                                neighbor_lods[i] = Some(world_chunk.chunk_lod.clone())
-                            }
-                        }
-
-                        if let Some(world_chunk) = grid_lock.get_mut(task.cv) {
-                            world_chunk.state = PipelineState::Meshing;
-                            let boxed_chunk_lod = Box::new(world_chunk.chunk_lod.clone());
-                            mesh_task::<V>(
-                                task.cv,
-                                boxed_chunk_lod,
-                                neighbor_lods,
-                                camera_data,
-                                &t_sx,
-                                &compute_pool,
-                            );
-
-                            break;
-                        }
-                    }
-
-                    while let Some(cv) = physics_loads.pop()
-                        && let Some(p_mesh) = physics_meshes.get_mut(&cv)
-                        && p_mesh.state == PhysicsMeshState::MeshNeeded
-                        && let Some(world_chunk) = grid_lock.get(cv)
-                        && world_chunk.is_stable()
-                        && world_chunk.chunk_lod.lod_level() == 1
-                    {
-                        println!("{cv} Generating physics mesh...");
-                        p_mesh.state = PhysicsMeshState::Meshing;
-                        let chunk_lod = Box::new(world_chunk.chunk_lod.clone());
-                        physics_mesh_task::<V>(cv, chunk_lod, &t_sx, &compute_pool);
-                        break;
-                    }
-                }
+            if !physics_unloads.is_empty() {
+                result_sender
+                    .send(PipelineResult::PhysicsMeshUnload {
+                        cvs: physics_unloads,
+                    })
+                    .ok();
             }
 
-            if !work_to_do && t_rx.is_empty() {
-                thread::sleep(std::time::Duration::from_millis(10));
+            let has_work_to_do =
+                !load_tasks.is_empty() || !mesh_tasks.is_empty() || !physics_loads.is_empty();
+
+            if has_work_to_do {
+                let mut queues = work_queues.lock().unwrap();
+                queues.load.extend(load_tasks);
+                queues.mesh.extend(mesh_tasks);
+                queues.physics.extend(physics_loads);
+                cvar.notify_all();
+            }
+
+            if !has_work_to_do {
+                thread::sleep(std::time::Duration::from_millis(5));
+            } else {
+                metrics
+                    .get_mut(PipelineMetrics::PipelineLoop)
+                    .record(loop_time.elapsed());
             }
         }
     })
 }
 
-fn batch_load_deltas_task(
-    aabbs: Vec<AABB>,
-    chunk_store: &Arc<ChunkStore>,
-    t_sx: &Sender<TaskResult>,
-    io_pool: &rayon::ThreadPool,
-) {
-    let t_sx = t_sx.clone();
-    let chunk_store = chunk_store.clone();
-    io_pool.spawn(move || {
-        let mut persisted_chunks: BatchedPersistedChunkMap = Default::default();
-        for aabb in aabbs {
-            chunk_store.load_chunks_in_aabb(aabb.min, aabb.max, &mut persisted_chunks);
-        }
-        t_sx.send(TaskResult::PersistedChunksLoaded { persisted_chunks })
-            .ok();
-    });
-}
-
 fn batch_unload_deltas_task(
     chunks_to_save: Vec<(ChunkVector, PersistedChunk)>,
     chunk_store: &Arc<ChunkStore>,
-    io_pool: &rayon::ThreadPool,
+    thread_pool: &rayon::ThreadPool,
 ) {
     let chunk_store = chunk_store.clone();
-    io_pool.spawn(move || {
+    thread_pool.spawn(move || {
         chunk_store.save_chunks(chunks_to_save);
     });
 }
 
-fn generate_task(
+fn load_task<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    generator: &Arc<Box<dyn VoxelGenerator>>,
-    t_sx: &Sender<TaskResult>,
-    compute_pool: &rayon::ThreadPool,
-    lod: LOD,
-) {
-    let generator = generator.clone();
-    let t_sx = t_sx.clone();
-    compute_pool.spawn(move || {
-        let mut chunk_lod = ChunkLOD::new(lod);
-        generator.apply(cv_to_wv(cv), &mut chunk_lod);
+    world_grid: &WorldGrid,
+    chunk_store: &ChunkStore,
+    generator: &Box<dyn VoxelGenerator>,
+) -> Option<()> {
+    if let Some(world_chunk) = world_grid.read().unwrap().get(cv)
+        && world_chunk.state != PipelineState::Loading
+    {
+        return None;
+    }
 
-        let uniform_voxel_id = if let ChunkLOD::LOD1(Chunk::Uniform(uniform)) = chunk_lod {
-            Some(uniform)
-        } else {
-            None
-        };
+    let mut chunk = Chunk::new();
 
-        t_sx.send(TaskResult::GenerationComplete {
-            cv,
-            chunk_lod,
-            uniform_voxel_id,
-        })
-        .ok();
-    });
+    let persisted_chunk = chunk_store.load_chunk(cv);
+    let (deltas, uniform_voxel_id) = persisted_chunk
+        .map(|pc| (pc.deltas, pc.uniform_voxel_id))
+        .unwrap_or_default();
+
+    if let Some(uniform) = uniform_voxel_id {
+        chunk.fill::<V>(uniform);
+    } else {
+        generator.apply(cv_to_wv(cv), &mut chunk);
+    }
+
+    if let Some(world_chunk) = world_grid.write().unwrap().get_mut(cv)
+        && world_chunk.state == PipelineState::Loading
+    {
+        world_chunk.deltas = deltas;
+        world_chunk.uniform_voxel_id = uniform_voxel_id;
+        world_chunk.chunk = chunk;
+        world_chunk.merge_deltas::<V>();
+        world_chunk.state = PipelineState::MeshNeeded;
+
+        Some(())
+    } else {
+        None
+    }
 }
 
-fn mesh_task<V: ChunkeeVoxel>(
-    cv: ChunkVector,
-    chunk: Box<ChunkLOD>,
-    neighbors: Box<[Option<ChunkLOD>; 6]>,
-    camera_data: &CameraData,
-    t_sx: &Sender<TaskResult>,
-    compute_pool: &rayon::ThreadPool,
-) {
-    let t_sx = t_sx.clone();
-    let camera_pos = camera_data.pos;
-    compute_pool.spawn(move || {
-        let complete_neighbors = Box::new(std::array::from_fn(|i| {
-            if let Some(n) = neighbors[i] {
-                return n;
-            }
+fn mesh_task<V: ChunkeeVoxel>(cv: ChunkVector, world_grid: &WorldGrid) -> Option<ChunkMeshGroup> {
+    let grid = world_grid.read().unwrap();
 
-            let neighbor_cv = cv + BLOCK_FACES[i].into_normal();
-            let lod = calc_lod(neighbor_cv, camera_pos);
-            ChunkLOD::new(lod)
-        }));
-        let mesh = mesh_chunk::<V>(cv, chunk, complete_neighbors);
-        t_sx.send(TaskResult::MeshComplete { cv, mesh }).ok();
-    });
+    let world_chunk = if let Some(world_chunk) = grid.get(cv) {
+        world_chunk
+    } else {
+        return None;
+    };
+
+    let neighbors: [Option<&WorldChunk>; 6] =
+        std::array::from_fn(|idx| grid.get(cv + BLOCK_FACES[idx].into_normal()));
+
+    let not_all_stable = neighbors
+        .iter()
+        .any(|op| op.is_some_and(|wc| !wc.is_stable()));
+
+    if not_all_stable {
+        return None;
+    }
+
+    let complete_neighbors: Box<[Chunk; 6]> = Box::new(std::array::from_fn(|i| {
+        if let Some(n) = neighbors[i] {
+            return n.chunk.clone();
+        }
+
+        Chunk::new()
+    }));
+
+    let center = Box::new(world_chunk.chunk.clone());
+
+    drop(grid);
+
+    let mesh = mesh_chunk::<V>(cv, center, complete_neighbors);
+
+    if let Some(world_chunk) = world_grid.write().unwrap().get_mut(cv)
+        && world_chunk.state == PipelineState::Meshing
+    {
+        world_chunk.state = PipelineState::MeshReady;
+        Some(mesh)
+    } else {
+        None
+    }
 }
 
 fn physics_mesh_task<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    chunk: Box<ChunkLOD>,
-    t_sx: &Sender<TaskResult>,
-    compute_pool: &rayon::ThreadPool,
-) {
-    let t_sx = t_sx.clone();
-    compute_pool.spawn(move || {
-        let mesh = mesh_physics_chunk::<V>(cv, chunk);
-        if !mesh.is_empty() {
-            t_sx.send(TaskResult::PhysicsMeshComplete { cv, mesh }).ok();
+    world_grid: &WorldGrid,
+) -> Option<Vec<Vec3>> {
+    let chunk = if let Some(world_chunk) = world_grid.read().unwrap().get(cv) {
+        if !world_chunk.is_stable() {
+            return None;
         }
-    });
-}
+        Box::new(world_chunk.chunk.clone())
+    } else {
+        return None;
+    };
 
-pub fn group_chunks_into_aabbs(chunks_to_load: Vec<IVec3>) -> Vec<AABB> {
-    let mut chunks = chunks_to_load.into_iter().collect::<HashSet<_>>();
-    let mut aabbs = Vec::new();
+    let mesh = mesh_physics_chunk::<V>(cv, chunk);
 
-    while !chunks.is_empty() {
-        let seed = *chunks.iter().next().unwrap();
-        chunks.remove(&seed);
-
-        let mut aabb = AABB {
-            min: seed,
-            max: seed,
-        };
-
-        let mut expanded_in_iteration = true;
-        while expanded_in_iteration {
-            expanded_in_iteration = false;
-
-            // -X
-            let mut can_expand = true;
-            for y in aabb.min.y..=aabb.max.y {
-                for z in aabb.min.z..=aabb.max.z {
-                    if !chunks.contains(&IVec3::new(aabb.min.x - 1, y, z)) {
-                        can_expand = false;
-                        break;
-                    }
-                }
-                if !can_expand {
-                    break;
-                }
-            }
-            if can_expand {
-                for y in aabb.min.y..=aabb.max.y {
-                    for z in aabb.min.z..=aabb.max.z {
-                        chunks.remove(&IVec3::new(aabb.min.x - 1, y, z));
-                    }
-                }
-                aabb.min.x -= 1;
-                expanded_in_iteration = true;
-            }
-
-            // +X
-            let mut can_expand = true;
-            for y in aabb.min.y..=aabb.max.y {
-                for z in aabb.min.z..=aabb.max.z {
-                    if !chunks.contains(&IVec3::new(aabb.max.x + 1, y, z)) {
-                        can_expand = false;
-                        break;
-                    }
-                }
-                if !can_expand {
-                    break;
-                }
-            }
-            if can_expand {
-                for y in aabb.min.y..=aabb.max.y {
-                    for z in aabb.min.z..=aabb.max.z {
-                        chunks.remove(&IVec3::new(aabb.max.x + 1, y, z));
-                    }
-                }
-                aabb.max.x += 1;
-                expanded_in_iteration = true;
-            }
-
-            // -Y
-            let mut can_expand = true;
-            for x in aabb.min.x..=aabb.max.x {
-                for z in aabb.min.z..=aabb.max.z {
-                    if !chunks.contains(&IVec3::new(x, aabb.min.y - 1, z)) {
-                        can_expand = false;
-                        break;
-                    }
-                }
-                if !can_expand {
-                    break;
-                }
-            }
-            if can_expand {
-                for x in aabb.min.x..=aabb.max.x {
-                    for z in aabb.min.z..=aabb.max.z {
-                        chunks.remove(&IVec3::new(x, aabb.min.y - 1, z));
-                    }
-                }
-                aabb.min.y -= 1;
-                expanded_in_iteration = true;
-            }
-
-            // +Y
-            let mut can_expand = true;
-            for x in aabb.min.x..=aabb.max.x {
-                for z in aabb.min.z..=aabb.max.z {
-                    if !chunks.contains(&IVec3::new(x, aabb.max.y + 1, z)) {
-                        can_expand = false;
-                        break;
-                    }
-                }
-                if !can_expand {
-                    break;
-                }
-            }
-            if can_expand {
-                for x in aabb.min.x..=aabb.max.x {
-                    for z in aabb.min.z..=aabb.max.z {
-                        chunks.remove(&IVec3::new(x, aabb.max.y + 1, z));
-                    }
-                }
-                aabb.max.y += 1;
-                expanded_in_iteration = true;
-            }
-
-            // -Z
-            let mut can_expand = true;
-            for x in aabb.min.x..=aabb.max.x {
-                for y in aabb.min.y..=aabb.max.y {
-                    if !chunks.contains(&IVec3::new(x, y, aabb.min.z - 1)) {
-                        can_expand = false;
-                        break;
-                    }
-                }
-                if !can_expand {
-                    break;
-                }
-            }
-            if can_expand {
-                for x in aabb.min.x..=aabb.max.x {
-                    for y in aabb.min.y..=aabb.max.y {
-                        chunks.remove(&IVec3::new(x, y, aabb.min.z - 1));
-                    }
-                }
-                aabb.min.z -= 1;
-                expanded_in_iteration = true;
-            }
-
-            // +Z
-            let mut can_expand = true;
-            for x in aabb.min.x..=aabb.max.x {
-                for y in aabb.min.y..=aabb.max.y {
-                    if !chunks.contains(&IVec3::new(x, y, aabb.max.z + 1)) {
-                        can_expand = false;
-                        break;
-                    }
-                }
-                if !can_expand {
-                    break;
-                }
-            }
-            if can_expand {
-                for x in aabb.min.x..=aabb.max.x {
-                    for y in aabb.min.y..=aabb.max.y {
-                        chunks.remove(&IVec3::new(x, y, aabb.max.z + 1));
-                    }
-                }
-                aabb.max.z += 1;
-                expanded_in_iteration = true;
-            }
+    if let Some(world_chunk) = world_grid.write().unwrap().get_mut(cv) {
+        if world_chunk.physics_state == PhysicsMeshState::Meshing {
+            world_chunk.physics_state = PhysicsMeshState::MeshReady;
         }
-
-        aabbs.push(aabb);
     }
 
-    aabbs
+    Some(mesh)
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::voxels::MyVoxels;
 use chunkee_core::{
-    chunk::ChunkLOD,
+    chunk::Chunk32,
     coords::{ChunkVector, LocalVector, WorldVector, cv_to_wv, wv_to_cv},
     generation::VoxelGenerator,
     glam::IVec2,
@@ -97,16 +97,15 @@ impl WorldGenerator {
 }
 
 impl VoxelGenerator for WorldGenerator {
-    fn apply(&self, chunk_start: WorldVector, chunk: &mut ChunkLOD) {
-        let side = chunk.size();
-        let lod_scale_factor = chunk.lod_scale_factor() as i32;
+    fn apply(&self, chunk_start: WorldVector, chunk: &mut Chunk32) {
+        let side = 32;
 
         let column_data = self.get_or_compute_column_data(wv_to_cv(chunk_start));
 
         for x in 0..side {
             for z in 0..side {
-                let cache_x = (x * lod_scale_factor) as usize;
-                let cache_z = (z * lod_scale_factor) as usize;
+                let cache_x = (x) as usize;
+                let cache_z = (z) as usize;
                 let cache_idx = cache_x + cache_z * 32;
 
                 let terrain_height_i32 = column_data.height_map[cache_idx].floor() as i32;
@@ -115,8 +114,8 @@ impl VoxelGenerator for WorldGenerator {
                 for y in 0..side {
                     let lv = LocalVector::new(x, y, z);
 
-                    let wv_y_bottom = chunk_start.y + y * lod_scale_factor;
-                    let wv_y_top = wv_y_bottom + lod_scale_factor - 1;
+                    let wv_y_bottom = chunk_start.y + y;
+                    let wv_y_top = wv_y_bottom;
 
                     if wv_y_bottom > terrain_height_i32 && wv_y_bottom > SEA_LEVEL {
                         continue;
@@ -138,7 +137,7 @@ impl VoxelGenerator for WorldGenerator {
                                 block_to_place = MyVoxels::Grass;
                             }
                         } else if wv_y_top < terrain_height_i32 {
-                            if wv_y_top > terrain_height_i32 - (3 * lod_scale_factor) {
+                            if wv_y_top > terrain_height_i32 - (3) {
                                 block_to_place = MyVoxels::Dirt;
                             } else {
                                 block_to_place = MyVoxels::Stone;
@@ -155,9 +154,9 @@ impl VoxelGenerator for WorldGenerator {
                     // We apply carving to any block that isn't water or air.
                     if block_to_place != MyVoxels::Water && block_to_place != MyVoxels::Air {
                         let wv = WorldVector::new(
-                            chunk_start.x + x * lod_scale_factor,
-                            chunk_start.y + y * lod_scale_factor,
-                            chunk_start.z + z * lod_scale_factor,
+                            chunk_start.x + x,
+                            chunk_start.y + y,
+                            chunk_start.z + z,
                         );
 
                         // Combine noise values. Multiplying them creates more varied, organic shapes.

@@ -1,6 +1,6 @@
 use glam::{IVec3, Vec3};
 
-use crate::coords::{CHUNK_SIZE, ChunkVector, camera_vec3_to_cv, cv_to_wv, wv_to_cv};
+use crate::coords::{CHUNK_SIZE, ChunkVector, camera_vec3_to_cv, cv_to_wv};
 
 // const LOD1_DIST: f32 = 8.0 * CHUNK_SIZE as f32;
 // const LOD2_DIST: f32 = 16.0 * CHUNK_SIZE as f32;
@@ -103,72 +103,6 @@ impl Frustum {
     }
 }
 
-// pub struct ChunkStreamResult {
-//     pub cv: ChunkVector,
-//     pub lod: LOD,
-//     pub priority: u32,
-// }
-
-// pub struct ChunkStreamer {
-//     previous_camera_cv: IVec3,
-//     radius_xz: u32,
-//     radius_y: u32,
-// }
-
-// impl ChunkStreamer {
-//     pub fn new(radius_xz: u32, radius_y: u32) -> Self {
-//         Self {
-//             previous_camera_cv: IVec3::MAX,
-//             radius_xz,
-//             radius_y,
-//         }
-//     }
-
-//     pub fn stream_chunks(&mut self, camera_data: &CameraData) -> Option<Vec<ChunkStreamResult>> {
-//         let curr_cam_cv = wv_to_cv((camera_data.pos.floor()).as_ivec3());
-//         if self.previous_camera_cv == curr_cam_cv {
-//             return None;
-//         }
-//         println!("Entered curr_cam_cv: {curr_cam_cv:?}");
-
-//         self.previous_camera_cv = curr_cam_cv;
-//         let chunks_in_range = self.get_chunks_in_range(camera_data);
-
-//         Some(chunks_in_range)
-//     }
-
-//     fn get_chunks_in_range(&self, camera_data: &CameraData) -> Vec<ChunkStreamResult> {
-//         let camera_cv = wv_to_cv(camera_data.pos.as_ivec3());
-
-//         let mut chunks_in_range =
-//             Vec::with_capacity(calc_total_chunks(self.radius_xz, self.radius_y) as usize);
-//         let radius_xz_i32 = self.radius_xz as i32;
-//         let radius_i32_y = self.radius_y as i32;
-
-//         for y in -radius_i32_y..=radius_i32_y {
-//             for z in -radius_xz_i32..=radius_xz_i32 {
-//                 for x in -radius_xz_i32..=radius_xz_i32 {
-//                     let cv = camera_cv + IVec3::new(x, y, z);
-//                     let lod = calc_lod(cv, camera_data.pos);
-//                     let priority = calculate_chunk_priority(cv, camera_data);
-//                     chunks_in_range.push(ChunkStreamResult { cv, lod, priority });
-//                 }
-//             }
-//         }
-
-//         chunks_in_range
-//     }
-// }
-
-pub fn should_unload(cv: IVec3, camera_pos: Vec3, radius: u32) -> bool {
-    let camera_cv = wv_to_cv(camera_pos.as_ivec3());
-
-    let diff = (cv - camera_cv).abs();
-    let radius_buffered = (radius + 1) as i32;
-
-    diff.x > radius_buffered || diff.y > radius_buffered || diff.z > radius_buffered
-}
-
 pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3) -> f32 {
     cv_to_wv(cv).as_vec3().distance_squared(camera_pos)
 }
@@ -176,7 +110,7 @@ pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3) -> f32 {
 pub fn compute_priority(cv: ChunkVector, camera_data: &CameraData) -> u32 {
     let camera_cv = camera_vec3_to_cv(camera_data.pos);
     let delta = camera_cv - cv;
-    if delta.x.abs() <= 1 && delta.y.abs() <= 1 && delta.z.abs() <= 1 {
+    if delta.x.abs() <= 2 && delta.y.abs() <= 2 && delta.z.abs() <= 2 {
         return 0;
     }
 

@@ -27,7 +27,8 @@ pub fn neighbors_of(cv: IVec3) -> [ChunkVector; 6] {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PipelineState {
+pub enum ChunkState {
+    None,
     LoadNeeded,
     Loading,
     MeshNeeded,
@@ -46,10 +47,11 @@ pub enum PhysicsMeshState {
 #[derive(Debug, Clone)]
 pub struct WorldChunk {
     pub cv: ChunkVector,
-    pub state: PipelineState,
+    pub state: ChunkState,
     pub chunk: Chunk,
     pub deltas: Deltas,
     pub is_dirty: bool,
+    pub version: u32,
     // pub priority: u32,
     pub uniform_voxel_id: Option<VoxelId>,
     pub physics_dependents: u32,
@@ -60,10 +62,11 @@ impl Default for WorldChunk {
     fn default() -> Self {
         Self {
             cv: ChunkVector::MAX,
-            state: PipelineState::LoadNeeded,
+            state: ChunkState::None,
             chunk: Chunk::new(),
             deltas: Deltas::default(),
             is_dirty: false,
+            version: 0,
             // priority: 0,
             uniform_voxel_id: None,
             physics_dependents: 0,
@@ -96,18 +99,19 @@ impl WorldChunk {
     pub fn is_stable(&self) -> bool {
         matches!(
             self.state,
-            PipelineState::MeshNeeded | PipelineState::Meshing | PipelineState::MeshReady
+            ChunkState::MeshNeeded | ChunkState::Meshing | ChunkState::MeshReady
         )
     }
 
     pub fn reset(&mut self, cv: ChunkVector) {
         self.cv = cv;
         self.is_dirty = false;
-        self.state = PipelineState::LoadNeeded;
+        self.state = ChunkState::LoadNeeded;
         self.deltas = Deltas::default();
         self.uniform_voxel_id = None;
         self.physics_dependents = 0;
         self.physics_state = PhysicsMeshState::MeshNeeded;
+        self.version = 0;
     }
 }
 
@@ -157,11 +161,14 @@ impl ChunkGrid {
         (chunk.cv == cv).then_some(chunk)
     }
 
-    fn cv_to_idx_with_origin(cv: IVec3, origin: IVec3, dims: IVec3) -> Option<usize> {
+    pub fn cv_to_idx_with_origin(cv: IVec3, origin: IVec3, dims: IVec3) -> Option<usize> {
         let local = cv - origin;
-        if (0..dims.x).contains(&local.x)
-            && (0..dims.y).contains(&local.y)
-            && (0..dims.z).contains(&local.z)
+        if local.x >= 0
+            && local.x < dims.x
+            && local.y >= 0
+            && local.y < dims.y
+            && local.z >= 0
+            && local.z < dims.z
         {
             Some((local.x + local.y * dims.x + local.z * dims.x * dims.y) as usize)
         } else {
@@ -181,7 +188,8 @@ impl ChunkGrid {
         camera_data: &CameraData,
         mut on_remap: F,
         metrics: &mut Metrics<PipelineMetrics>,
-    ) where
+    ) -> Option<(IVec3, IVec3)>
+    where
         F: FnMut(GridOp),
     {
         const SNAP_DISTANCE: i32 = 4;
@@ -209,7 +217,7 @@ impl ChunkGrid {
         let dist_from_anchor = (camera_cv - self.grid_anchor).abs().max_element();
 
         if dist_from_anchor <= TRIGGER_RADIUS && !is_first_run {
-            return;
+            return None;
         }
 
         if !is_first_run {
@@ -262,5 +270,7 @@ impl ChunkGrid {
         metrics
             .get_mut(PipelineMetrics::GridUpdate)
             .record(time.elapsed());
+
+        Some((self.grid_origin, self.dimensions))
     }
 }

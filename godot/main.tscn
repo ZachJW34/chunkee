@@ -63,12 +63,12 @@ albedo_color = Color(1, 0, 0, 1)
 environment = SubResource("Environment_5vw27")
 camera_attributes = SubResource("CameraAttributesPractical_kek77")
 script = ExtResource("1_h2yge")
-current_time = 13.0186
+current_time = 13.8999
 minutes_per_day = 1217.8
 metadata/_custom_type_script = "uid://cdk4h6kxxjfqt"
 
 [node name="SunLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.965645, -0.259866, 0.622034, -0.203473, 0.75609, -0.78299, -0.161646, 0.600664, -0.259866, 0.75609, 0.600664)
+transform = Transform3D(0, -0.889449, -0.457034, 0.649487, -0.347516, 0.676313, -0.760372, -0.296838, 0.577686, -0.457033, 0.676313, 0.577686)
 shadow_enabled = true
 
 [node name="MoonLight" type="DirectionalLight3D" parent="Sky3D"]
@@ -88,8 +88,8 @@ ground_color = Color(0.3, 0.3, 0.3, 1)
 sky_layers = 4
 sky_render_priority = -128
 horizon_level = 0.0
-sun_altitude = -40.8792
-sun_azimuth = -203.395
+sun_altitude = -47.4438
+sun_azimuth = -218.349
 sun_disk_color = Color(0.996094, 0.541334, 0.140076, 1)
 sun_disk_intensity = 2.0
 sun_disk_size = 0.015
@@ -97,8 +97,8 @@ sun_light_path = NodePath("../SunLight")
 sun_light_color = Color(1, 1, 1, 1)
 sun_horizon_light_color = Color(0.98, 0.523, 0.294, 1)
 sun_light_energy = 1.0
-moon_altitude = -125.837
-moon_azimuth = -279.998
+moon_altitude = -137.627
+moon_azimuth = -285.152
 moon_color = Color(1, 1, 1, 1)
 moon_size = 0.07
 enable_set_moon_texture = false
@@ -106,7 +106,7 @@ moon_resolution = 2
 moon_light_path = NodePath("../MoonLight")
 moon_light_color = Color(0.572549, 0.776471, 0.956863, 1)
 moon_light_energy = 0.3
-deep_space_euler = Vector3(1.29154, 3.14159, 0.874136)
+deep_space_euler = Vector3(1.29154, -3.14159, 0.64274)
 background_color = Color(0.709804, 0.709804, 0.709804, 0.854902)
 set_background_texture = false
 stars_field_color = Color(1, 1, 1, 1)
@@ -173,7 +173,7 @@ script = ExtResource("3_lquwl")
 dome_path = NodePath("../Skydome")
 system_sync = false
 total_cycle_in_minutes = 1217.8
-total_hours = 13.0186
+total_hours = 13.8999
 day = 13
 month = 1
 year = 2025
@@ -193,6 +193,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 60, 0)
 safe_margin = 0.1
 script = ExtResource("1_7mycd")
 jump_velocity = 14.0
+fly_speed = 24.0
 
 [node name="Camera3D" type="Camera3D" parent="CharacterBody3D"]
 current = true

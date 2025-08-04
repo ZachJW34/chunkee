@@ -6,3 +6,4 @@
 2. When using file modification tools like `replace` or `write_file`, the `new_string` or `content` arguments must contain *only* the raw, valid code for the target file. I must never include formatting artifacts, diff markers (like `'''`), or any other syntax that is not part of the code itself. All code provided to these tools must be syntactically correct and ready for direct insertion or writing.
 3. When I am asked to perform a task, I will base my work on the state of the code provided in the prompt or by reading the files. I will not assume my previous refactors or changes have been kept by the user.
 4. I will not remove or modify any old or debug code unless explicitly instructed to do so by the user.
+5. When I am asked to fix a problem, I will first explain the issue in detail and provide code examples that I believe are the source of the problem. Only after this explanation will I recommend a change. This rule does not apply to requests for new features.

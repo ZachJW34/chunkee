@@ -4,14 +4,14 @@ use crate::{
     generation::VoxelGenerator,
     grid::ChunkGrid,
     meshing::ChunkMeshGroup,
-    pipeline::{PhysicsEntity, PipelineMessage, PipelineResult, spawn_pipeline_thread},
+    pipeline::{PhysicsEntity, PipelineMessage, spawn_pipeline_thread},
     storage::ChunkStore,
     streaming::CameraData,
     traversal::DDAState,
 };
 use block_mesh::VoxelVisibility;
 use crossbeam::queue::SegQueue;
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Sender;
 use glam::{IVec3, Vec3};
 use std::{
     marker::PhantomData,
@@ -30,11 +30,16 @@ pub type UnloadQueue = SegQueue<ChunkVector>;
 pub type EditsAppliedQueue = SegQueue<(IVec3, VoxelId)>;
 pub type WorldGrid = Arc<RwLock<ChunkGrid>>;
 
+pub struct ResultQueues {
+    pub mesh_load: SegQueue<(ChunkVector, ChunkMeshGroup)>,
+    pub mesh_unload: SegQueue<ChunkVector>,
+    pub physics_load: SegQueue<(ChunkVector, Vec<Vec3>)>,
+    pub physics_unload: SegQueue<ChunkVector>,
+    pub edits: SegQueue<(WorldVector, VoxelId)>,
+}
+
 pub struct ChunkeeWorld<V: ChunkeeVoxel> {
-    pub mesh_queue: MeshQueue,
-    pub physics_mesh_queue: PhysicsMeshQueue,
-    pub physics_mesh_unload_queue: UnloadQueue,
-    pub edits_applied_queue: EditsAppliedQueue,
+    pub results: Arc<ResultQueues>,
     pub radius: u32,
     grid: WorldGrid,
     camera_pos: Vec3,
@@ -51,18 +56,23 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         let chunk_store = Arc::new(ChunkStore::new());
         let grid = Arc::new(RwLock::new(ChunkGrid::new(radius)));
         let generator = Arc::new(generator);
+        let results = Arc::new(ResultQueues {
+            mesh_load: SegQueue::new(),
+            mesh_unload: SegQueue::new(),
+            physics_load: SegQueue::new(),
+            physics_unload: SegQueue::new(),
+            edits: SegQueue::new(),
+        });
 
         Self {
+            results,
             grid,
             chunk_store,
             radius,
             generator,
             camera_pos: Vec3::NAN,
             pipeline: None,
-            mesh_queue: SegQueue::new(),
-            physics_mesh_queue: SegQueue::new(),
-            physics_mesh_unload_queue: SegQueue::new(),
-            edits_applied_queue: SegQueue::new(),
+
             _voxel_type: PhantomData,
         }
     }
@@ -70,18 +80,17 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
     pub fn enable_pipeline(&mut self) {
         if self.pipeline.is_none() {
             let (pipeline_sender, pipeline_receiver) = crossbeam_channel::unbounded();
-            let (mesh_sender, mesh_receiver) = crossbeam_channel::unbounded();
             let pipeline_handle = spawn_pipeline_thread::<V>(
                 self.grid.clone(),
                 self.chunk_store.clone(),
                 self.generator.clone(),
                 pipeline_receiver,
-                mesh_sender,
+                self.results.clone(),
             );
             self.pipeline = Some(Pipeline {
                 handle: pipeline_handle,
                 sender: pipeline_sender,
-                receiver: mesh_receiver,
+                // receiver: mesh_receiver,
             })
         }
     }
@@ -108,25 +117,25 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
                 .ok();
         }
 
-        for result in pipeline.receiver.try_iter() {
-            match result {
-                PipelineResult::MeshReady { cv, mesh } => self.mesh_queue.push((cv, mesh)),
-                PipelineResult::PhysicsMeshReady { cv, mesh } => {
-                    self.physics_mesh_queue.push((cv, mesh))
-                }
-                PipelineResult::PhysicsMeshUnload { cvs } => {
-                    for cv in cvs {
-                        self.physics_mesh_unload_queue.push(cv);
-                    }
-                }
-                PipelineResult::EditsApplied(edits) => {
-                    for edit in edits {
-                        self.edits_applied_queue.push(edit);
-                    }
-                }
-                PipelineResult::ChunkUnloaded { cv: _cv } => {}
-            }
-        }
+        // for result in pipeline.receiver.try_iter() {
+        //     match result {
+        //         PipelineResult::MeshReady { cv, mesh } => self.mesh_queue.push((cv, mesh)),
+        //         PipelineResult::PhysicsMeshReady { cv, mesh } => {
+        //             self.physics_mesh_queue.push((cv, mesh))
+        //         }
+        //         PipelineResult::PhysicsMeshUnload { cvs } => {
+        //             for cv in cvs {
+        //                 self.physics_mesh_unload_queue.push(cv);
+        //             }
+        //         }
+        //         PipelineResult::EditsApplied(edits) => {
+        //             for edit in edits {
+        //                 self.edits_applied_queue.push(edit);
+        //             }
+        //         }
+        //         PipelineResult::ChunkUnloaded { cv: _cv } => {}
+        //     }
+        // }
     }
 
     pub fn set_voxels_at(&self, changes: &[(WorldVector, V)]) {
@@ -226,5 +235,5 @@ pub enum VoxelRaycast<V: ChunkeeVoxel> {
 struct Pipeline {
     pub handle: JoinHandle<()>,
     pub sender: Sender<PipelineMessage>,
-    pub receiver: Receiver<PipelineResult>,
+    // pub receiver: Receiver<PipelineResult>,
 }

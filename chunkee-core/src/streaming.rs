@@ -165,7 +165,7 @@ pub fn should_unload(cv: IVec3, camera_pos: Vec3, radius: u32) -> bool {
 
     let diff = (cv - camera_cv).abs();
     let radius_buffered = (radius + 1) as i32;
-    
+
     diff.x > radius_buffered || diff.y > radius_buffered || diff.z > radius_buffered
 }
 
@@ -173,7 +173,7 @@ pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3) -> f32 {
     cv_to_wv(cv).as_vec3().distance_squared(camera_pos)
 }
 
-pub fn calculate_chunk_priority(cv: ChunkVector, camera_data: &CameraData) -> u32 {
+pub fn compute_priority(cv: ChunkVector, camera_data: &CameraData) -> u32 {
     let camera_cv = camera_vec3_to_cv(camera_data.pos);
     let delta = camera_cv - cv;
     if delta.x.abs() <= 1 && delta.y.abs() <= 1 && delta.z.abs() <= 1 {

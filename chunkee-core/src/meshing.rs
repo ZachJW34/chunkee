@@ -1,16 +1,17 @@
 use std::marker::PhantomData;
 
 use block_mesh::{
-    GreedyQuadsBuffer, MergeVoxel, OrientedBlockFace, RIGHT_HANDED_Y_UP_CONFIG, UnorientedQuad,
-    Voxel, VoxelVisibility, greedy_quads,
+    greedy_quads,
     ndshape::{ConstShape, ConstShape3u32},
+    GreedyQuadsBuffer, MergeVoxel, OrientedBlockFace, UnorientedQuad, Voxel, VoxelVisibility,
+    RIGHT_HANDED_Y_UP_CONFIG,
 };
 use glam::{IVec3, Vec3};
 
 use crate::{
-    block::{BLOCK_FACES, BlockFace, ChunkeeVoxel, Rotation, VoxelCollision, VoxelId},
-    chunk::{CHUNK_SIDE_32, Chunk},
-    coords::{ChunkVector, cv_to_wv},
+    block::{BlockFace, ChunkeeVoxel, Rotation, VoxelCollision, VoxelId, BLOCK_FACES},
+    chunk::{Chunk, CHUNK_SIDE_32},
+    coords::{cv_to_wv, ChunkVector},
 };
 
 type Shape34 = ConstShape3u32<34, 34, 34>;
@@ -128,6 +129,7 @@ pub fn mesh_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
     chunk: Box<Chunk>,
     neighbors: Box<[Chunk; 6]>,
+    voxel_size: f32,
 ) -> ChunkMeshGroup {
     let padded_side = CHUNK_SIDE_32 + 2;
     let padded_volume = padded_side * padded_side * padded_side;
@@ -142,20 +144,22 @@ pub fn mesh_chunk<V: ChunkeeVoxel>(
         )
     };
 
-    run_greedy_mesher(cv, mesher_voxels)
+    run_greedy_mesher(cv, mesher_voxels, voxel_size)
 }
 
 fn run_greedy_mesher<V: ChunkeeVoxel>(
     cv: ChunkVector,
     padded_voxels: &[MesherVoxel<V>],
+    voxel_size: f32,
 ) -> ChunkMeshGroup {
-    run_greedy_mesher_generic::<V, Shape34>(cv, padded_voxels, &Shape34 {})
+    run_greedy_mesher_generic::<V, Shape34>(cv, padded_voxels, &Shape34 {}, voxel_size)
 }
 
 fn run_greedy_mesher_generic<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
     cv: ChunkVector,
     padded_voxels: &[MesherVoxel<V>],
     shape: &S,
+    voxel_size: f32,
 ) -> ChunkMeshGroup {
     let mut buffer = GreedyQuadsBuffer::new(padded_voxels.len());
     let padded_side = S::ARRAY[0];
@@ -170,7 +174,7 @@ fn run_greedy_mesher_generic<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
         &mut buffer,
     );
 
-    build_mesh_from_quads::<V, S>(&buffer, padded_voxels, cv)
+    build_mesh_from_quads::<V, S>(&buffer, padded_voxels, cv, voxel_size)
 }
 
 fn build_padded_buffer<V: ChunkeeVoxel>(
@@ -220,8 +224,9 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
     buffer: &GreedyQuadsBuffer,
     padded_voxels: &[MesherVoxel<V>],
     cv: ChunkVector,
+    voxel_size: f32,
 ) -> ChunkMeshGroup {
-    let chunk_offset = cv_to_wv(cv).to_array().map(|s| s as f32);
+    let chunk_offset = (cv_to_wv(cv).as_vec3() * voxel_size).to_array();
     let num_quads = buffer.quads.num_quads();
     let num_indices = num_quads * 6;
     let num_vertices = num_quads * 4;
@@ -261,7 +266,15 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
                 &mut translucent
             };
 
-            process_quad(mesh, quad, face, chunk_offset, voxel, rotation);
+            process_quad(
+                mesh,
+                quad,
+                face,
+                chunk_offset,
+                voxel,
+                rotation,
+                voxel_size,
+            );
         }
     }
 
@@ -314,6 +327,7 @@ fn process_quad<V: ChunkeeVoxel>(
     chunk_offset: [f32; 3],
     voxel: V,
     rotation: Rotation,
+    voxel_size: f32,
 ) {
     let start_vertex = mesh_data.positions.len() as u32;
     let mut new_indices = face.quad_mesh_indices(start_vertex);
@@ -321,11 +335,11 @@ fn process_quad<V: ChunkeeVoxel>(
     new_indices.swap(4, 5);
 
     // positions
-    let mut new_positions = face.quad_mesh_positions(quad, 1.0);
+    let mut new_positions = face.quad_mesh_positions(quad, voxel_size);
 
     let chunk_offset_vec = Vec3::from(chunk_offset);
     for v in &mut new_positions {
-        let scaled_local_pos = Vec3::from(*v) - Vec3::ONE;
+        let scaled_local_pos = Vec3::from(*v) - Vec3::splat(voxel_size);
         *v = (scaled_local_pos + chunk_offset_vec).to_array();
     }
 
@@ -376,7 +390,11 @@ impl<V: ChunkeeVoxel> MergeVoxel for PhysicsMesherVoxel<V> {
     }
 }
 
-pub fn mesh_physics_chunk<V: ChunkeeVoxel>(cv: ChunkVector, chunk: Box<Chunk>) -> Vec<Vec3> {
+pub fn mesh_physics_chunk<V: ChunkeeVoxel>(
+    cv: ChunkVector,
+    chunk: Box<Chunk>,
+    voxel_size: f32,
+) -> Vec<Vec3> {
     let padded_side = CHUNK_SIDE_32 + 2;
     let padded_volume = padded_side * padded_side * padded_side;
     let mut padded_voxels = vec![VoxelId::AIR; padded_volume as usize];
@@ -410,7 +428,7 @@ pub fn mesh_physics_chunk<V: ChunkeeVoxel>(cv: ChunkVector, chunk: Box<Chunk>) -
         &mut buffer,
     );
 
-    let chunk_offset = cv_to_wv(cv).as_vec3();
+    let chunk_offset = cv_to_wv(cv).as_vec3() * voxel_size;
     let mut triangles = Vec::with_capacity(buffer.quads.num_quads() * 2 * 3);
 
     for (face, quads) in RIGHT_HANDED_Y_UP_CONFIG
@@ -419,7 +437,7 @@ pub fn mesh_physics_chunk<V: ChunkeeVoxel>(cv: ChunkVector, chunk: Box<Chunk>) -
         .zip(buffer.quads.groups.into_iter())
     {
         for quad in quads.into_iter() {
-            let positions = face.quad_mesh_positions(&quad.into(), 1.0);
+            let positions = face.quad_mesh_positions(&quad.into(), voxel_size);
 
             let indices = face.quad_mesh_indices(0);
 
@@ -433,7 +451,7 @@ pub fn mesh_physics_chunk<V: ChunkeeVoxel>(cv: ChunkVector, chunk: Box<Chunk>) -
             // 4. Use the canonical indices to build the triangle soup correctly.
             for &i in indices.iter() {
                 let local_pos = p[i as usize];
-                let world_pos = (local_pos - Vec3::ONE) + chunk_offset;
+                let world_pos = (local_pos - Vec3::splat(voxel_size)) + chunk_offset;
                 triangles.push(world_pos);
             }
         }

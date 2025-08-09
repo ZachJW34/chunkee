@@ -7,8 +7,8 @@ use sled::IVec;
 use crate::{
     block::VoxelId,
     coords::{ChunkVector, idx_to_lv, lv_to_idx},
-    grid::Deltas,
     hasher::VoxelHashMap,
+    pipeline::Deltas,
 };
 
 pub type BatchedPersistedChunkMap = VoxelHashMap<Option<PersistedChunk>>;

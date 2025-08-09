@@ -13,15 +13,13 @@ use block_mesh::VoxelVisibility;
 use crossbeam::queue::SegQueue;
 use crossbeam_channel::Sender;
 use glam::{IVec3, Vec3};
-use std::{
-    marker::PhantomData,
-    sync::{Arc, RwLock},
-    thread::JoinHandle,
-};
+use parking_lot::RwLock;
+use std::{marker::PhantomData, sync::Arc, thread::JoinHandle};
 
 pub struct ChunkeeWorldConfig {
     pub radius: u32,
     pub generator: Box<dyn VoxelGenerator>,
+    pub voxel_size: f32,
 }
 
 pub type MeshQueue = SegQueue<(ChunkVector, ChunkMeshGroup)>;
@@ -46,12 +44,17 @@ pub struct ChunkeeWorld<V: ChunkeeVoxel> {
     chunk_store: Arc<ChunkStore>,
     pipeline: Option<Pipeline>,
     generator: Arc<Box<dyn VoxelGenerator>>,
+    pub voxel_size: f32,
     _voxel_type: PhantomData<V>,
 }
 
 impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
     pub fn new(config: ChunkeeWorldConfig) -> Self {
-        let ChunkeeWorldConfig { radius, generator } = config;
+        let ChunkeeWorldConfig {
+            radius,
+            generator,
+            voxel_size,
+        } = config;
 
         let chunk_store = Arc::new(ChunkStore::new());
         let grid = Arc::new(RwLock::new(ChunkGrid::new(radius)));
@@ -72,7 +75,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
             generator,
             camera_pos: Vec3::NAN,
             pipeline: None,
-
+            voxel_size,
             _voxel_type: PhantomData,
         }
     }
@@ -86,6 +89,8 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
                 self.generator.clone(),
                 pipeline_receiver,
                 self.results.clone(),
+                self.radius,
+                self.voxel_size,
             );
             self.pipeline = Some(Pipeline {
                 handle: pipeline_handle,
@@ -164,13 +169,15 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         ray_direction: Vec3,
         max_steps: u32,
     ) -> VoxelRaycast<V> {
-        let mut dda = DDAState::from_pos_and_dir(ray_origin.into(), ray_direction.into());
+        let mut dda =
+            DDAState::from_pos_and_dir((ray_origin / self.voxel_size).into(), ray_direction.into());
 
         for _ in 0..(max_steps as usize) {
             let pos = dda.next_voxelpos;
             let cv = wv_to_cv(pos);
-            if let Ok(lock) = self.grid.try_read()
-                && let Some(world_chunk) = lock.get(cv)
+            if let Some(grid) = self.grid.try_read()
+                && let Some(rw) = grid.get(cv)
+                && let Some(world_chunk) = rw.try_read()
                 && world_chunk.is_stable()
             {
                 let lv = wv_to_lv(pos);
@@ -189,31 +196,32 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         VoxelRaycast::Miss
     }
 
-    pub fn get_voxels_for_aabb(&self, aabb: AABB, padding: i32) -> Vec<(WorldVector, VoxelId)> {
-        let padded_min = aabb.min - padding;
-        let padded_max = aabb.max + padding;
-        let mut voxels = vec![];
-        let grid_lock = self.grid.read().unwrap();
+    // pub fn get_voxels_for_aabb(&self, aabb: AABB, padding: i32) -> Vec<(WorldVector, VoxelId)> {
+    //     let padded_min = aabb.min - padding;
+    //     let padded_max = aabb.max + padding;
+    //     let mut voxels = vec![];
+    //     let grid_lock = self.grid.read();
 
-        for x in padded_min.x..padded_max.x {
-            for y in padded_min.y..padded_max.y {
-                for z in padded_min.z..padded_max.z {
-                    let wv = IVec3::new(x, y, z);
-                    let cv = wv_to_cv(wv);
-                    let lv = wv_to_lv(wv);
-                    if let Some(world_chunk) = grid_lock.get(cv)
-                        && world_chunk.is_stable()
-                    {
-                        voxels.push((wv, world_chunk.chunk.get_voxel(lv)));
-                    } else {
-                        voxels.push((wv, VoxelId::AIR));
-                    }
-                }
-            }
-        }
+    //     for x in padded_min.x..padded_max.x {
+    //         for y in padded_min.y..padded_max.y {
+    //             for z in padded_min.z..padded_max.z {
+    //                 let wv = IVec3::new(x, y, z);
+    //                 let cv = wv_to_cv(wv);
+    //                 let lv = wv_to_lv(wv);
+    //                 if let Some(world_chunk) = grid_lock.get(cv)
+    //                     && world_chunk.is_stable()
+    //                 {
+    //                     voxels.push((wv, world_chunk.chunk.get_voxel(lv)));
+    //                 } else {
+    //                     voxels.push((wv, VoxelId::AIR));
+    //                 }
+    //             }
+    //         }
+    //     }
 
-        voxels
-    }
+    //     voxels
+    // }
+
     pub fn update_physics_entities(&self, entities: Vec<PhysicsEntity>) {
         let pipeline = if let Some(pipeline) = self.pipeline.as_ref() {
             pipeline
@@ -232,6 +240,7 @@ pub enum VoxelRaycast<V: ChunkeeVoxel> {
     Miss,
     None,
 }
+
 struct Pipeline {
     pub handle: JoinHandle<()>,
     pub sender: Sender<PipelineMessage>,

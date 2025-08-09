@@ -1,6 +1,6 @@
 use glam::{IVec3, Vec3};
 
-use crate::coords::{CHUNK_SIZE, ChunkVector, camera_vec3_to_cv, cv_to_wv};
+use crate::coords::{CHUNK_SIZE, camera_vec3_to_cv, cv_to_wv};
 
 // const LOD1_DIST: f32 = 8.0 * CHUNK_SIZE as f32;
 // const LOD2_DIST: f32 = 16.0 * CHUNK_SIZE as f32;
@@ -71,9 +71,9 @@ pub struct CameraData {
 
 impl Frustum {
     // TODO: Investigate frustum check when moving backwards, something is off
-    pub fn is_chunk_in_frustum(&self, cv: ChunkVector) -> bool {
-        let min_corner = cv_to_wv(cv).as_vec3();
-        let max_corner = min_corner + Vec3::splat(CHUNK_SIZE as f32);
+    pub fn is_chunk_in_frustum(&self, cv: IVec3, voxel_size: f32) -> bool {
+        let min_corner = cv_to_wv(cv).as_vec3() * voxel_size;
+        let max_corner = min_corner + Vec3::splat(CHUNK_SIZE as f32 * voxel_size);
 
         for plane in &self.planes {
             let p_vertex = Vec3::new(
@@ -103,25 +103,23 @@ impl Frustum {
     }
 }
 
-pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3) -> f32 {
-    cv_to_wv(cv).as_vec3().distance_squared(camera_pos)
+pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3, voxel_size: f32) -> f32 {
+    (cv_to_wv(cv).as_vec3() * voxel_size).distance_squared(camera_pos)
 }
 
-pub fn compute_priority(cv: ChunkVector, camera_data: &CameraData) -> u32 {
-    let camera_cv = camera_vec3_to_cv(camera_data.pos);
+pub fn compute_priority(cv: IVec3, camera_data: &CameraData, voxel_size: f32) -> u32 {
+    let camera_cv = camera_vec3_to_cv(camera_data.pos, voxel_size);
     let delta = camera_cv - cv;
     if delta.x.abs() <= 2 && delta.y.abs() <= 2 && delta.z.abs() <= 2 {
         return 0;
     }
 
-    let distance_sq = cv_camera_distance_sq(cv, camera_data.pos);
-    let not_in_frustum = !camera_data.frustum.is_chunk_in_frustum(cv);
+    let distance_sq = cv.distance_squared(camera_cv);
+    let not_in_frustum = !camera_data.frustum.is_chunk_in_frustum(cv, voxel_size);
 
     (distance_sq as u32) + (not_in_frustum as u32) * 100000
 }
 
-pub fn calc_total_chunks(radius_xz: u32, radius_y: u32) -> u32 {
-    let size_xz = 2 * radius_xz + 1;
-    let size_y = 2 * radius_y + 1;
-    size_xz * size_xz * size_y
+pub fn calc_total_chunks(radius: u32) -> u32 {
+    ((radius * 2) + 1).pow(3)
 }

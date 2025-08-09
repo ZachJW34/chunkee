@@ -48,6 +48,8 @@ pub struct ChunkeeWorldNode {
     pub opaque_material: Option<Gd<ShaderMaterial>>,
     #[export]
     pub translucent_material: Option<Gd<ShaderMaterial>>,
+    #[export]
+    pub voxel_size: f32,
 }
 
 #[godot_api]
@@ -55,9 +57,11 @@ impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
         env_logger::init();
         println!("Initializing ChunkeeWorldNode");
+        let voxel_size = 1.0;
         let config = ChunkeeWorldConfig {
-            radius: 8,
+            radius: 16,
             generator: Box::new(WorldGenerator::new()),
+            voxel_size,
         };
         let voxel_world: ChunkeeWorld<MyVoxels> = ChunkeeWorld::new(config);
 
@@ -73,12 +77,13 @@ impl IStaticBody3D for ChunkeeWorldNode {
             outline_node: None,
             show_physics_debug_mesh: false,
             metrics: Metrics::new(Duration::from_secs(2)),
+            voxel_size,
         }
     }
 
     fn ready(&mut self) {
         self.voxel_world.enable_pipeline();
-        let mut outline = create_voxel_outline();
+        let mut outline = create_voxel_outline(self.voxel_size);
         outline.set_visible(false);
         self.base_mut().add_child(&outline);
         self.outline_node = Some(outline);
@@ -133,7 +138,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
 
             self.render();
 
-            self.metrics.batch_print();
+            // self.metrics.batch_print();
         } else {
             println!("Cannot update without camera")
         }
@@ -241,7 +246,8 @@ impl ChunkeeWorldNode {
 
             if let Some(outline_node) = self.outline_node.as_mut() {
                 if let Some((pos, _)) = self.voxel_hit {
-                    let new_pos = Vector3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+                    let new_pos =
+                        Vector3::new(pos.x as f32, pos.y as f32, pos.z as f32) * self.voxel_size;
                     outline_node.set_position(new_pos);
                     outline_node.set_visible(true);
                 } else {
@@ -254,18 +260,9 @@ impl ChunkeeWorldNode {
     }
 
     fn process_physics_meshes(&mut self) {
-        let physics_load_limit = 10;
-        for _ in 0..physics_load_limit {
-            if self.voxel_world.results.physics_load.is_empty() {
-                break;
-            }
-
-            let (cv, triangles) = self.voxel_world.results.physics_load.pop().unwrap();
-
-            if triangles.is_empty() {
-                continue;
-            }
-
+        if let Some((cv, triangles)) = self.voxel_world.results.physics_load.pop()
+            && !triangles.is_empty()
+        {
             // --- Debug Visualization Mesh ---
             let mut debug_mesh_instance = build_physics_debug_mesh(triangles.clone());
             debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
@@ -333,14 +330,14 @@ fn build_mesh_instance(
     mesh_instance
 }
 
-fn create_voxel_outline() -> Gd<MeshInstance3D> {
+fn create_voxel_outline(voxel_size: f32) -> Gd<MeshInstance3D> {
     let mut st = SurfaceTool::new_gd();
 
     st.begin(PrimitiveType::LINES);
 
     // Create a 1x1x1 cube. Add a small offset to avoid Z-fighting with the actual voxel mesh.
-    let size = 1.001;
-    let offset = -0.0005; // Helps center the outline on the voxel block
+    let size = (1.0 * voxel_size) + (0.001 * voxel_size);
+    let offset = -0.0005 * voxel_size; // Helps center the outline on the voxel block
 
     let v = [
         Vector3::new(offset, offset, offset), // 0: bottom-left-front

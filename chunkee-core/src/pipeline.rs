@@ -166,7 +166,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
         });
 
         let worker_pool = WorkerPool::new::<V>(
-            6,
+            4,
             work_queues.clone(),
             world_grid.clone(),
             chunk_store.clone(),
@@ -346,10 +346,6 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                 let mut new_load_tasks = Vec::new();
                 let mut grid = world_grid.write();
 
-                let capacity = calc_total_chunks(radius) as usize;
-                let mut hashmap: HashMap<IVec3, RwLock<()>, BuildMortonHasher> =
-                    HashMap::with_capacity_and_hasher(capacity, BuildMortonHasher::new());
-
                 if let Some(new_grid_info) = grid.update(
                     camera_cv,
                     |op| match op {
@@ -373,16 +369,6 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                                 priority: compute_priority(cv, camera_data, voxel_size),
                             });
                             worker_pool.sender.send(()).ok();
-
-                            match hashmap.entry(cv) {
-                                Entry::Occupied(occ) => {
-                                    let res = occ.remove();
-                                    hashmap.insert(cv, res);
-                                }
-                                Entry::Vacant(vac) => {
-                                    vac.insert(RwLock::new(()));
-                                }
-                            }
                         }
                     },
                     &mut metrics,
@@ -445,16 +431,17 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                     worker_pool.sender.send(()).ok();
                 }
 
-                // work_queues.print_len();
-
                 metrics
                     .get_mut(PipelineMetrics::PipelineLoop)
                     .record(loop_time.elapsed());
-
-                thread::sleep(std::time::Duration::from_millis(5));
-            } else {
-                thread::sleep(std::time::Duration::from_millis(5));
             }
+
+            if !work_queues.is_empty() {
+                work_queues.print_len();
+                worker_pool.sender.send(()).ok();
+            }
+
+            thread::sleep(Duration::from_millis(5));
         }
     })
 }

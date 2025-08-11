@@ -18,12 +18,11 @@ sky_material = SubResource("PhysicalSkyMaterial_7mycd")
 background_mode = 2
 sky = SubResource("Sky_272bh")
 ambient_light_source = 3
-ambient_light_color = Color(0.966284, 0.966284, 0.966284, 1)
+ambient_light_color = Color(1, 1, 1, 1)
 reflected_light_source = 2
 tonemap_mode = 3
 tonemap_white = 6.0
 ssao_enabled = true
-sdfgi_enabled = true
 
 [sub_resource type="CameraAttributesPractical" id="CameraAttributesPractical_kek77"]
 
@@ -64,12 +63,12 @@ albedo_color = Color(1, 0, 0, 1)
 environment = SubResource("Environment_5vw27")
 camera_attributes = SubResource("CameraAttributesPractical_kek77")
 script = ExtResource("1_h2yge")
-current_time = 9.15931
+current_time = 10.0062
 minutes_per_day = 1217.8
 metadata/_custom_type_script = "uid://cdk4h6kxxjfqt"
 
 [node name="SunLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.785172, 0.619278, 0.692703, 0.446637, 0.566284, -0.721223, 0.428975, 0.543891, 0.619278, 0.566284, 0.543891)
+transform = Transform3D(0, -0.892268, 0.451507, 0.646278, 0.344546, 0.680891, -0.763102, 0.291799, 0.576653, 0.451507, 0.680891, 0.576653)
 shadow_enabled = true
 
 [node name="MoonLight" type="DirectionalLight3D" parent="Sky3D"]
@@ -89,8 +88,8 @@ ground_color = Color(0.3, 0.3, 0.3, 1)
 sky_layers = 4
 sky_render_priority = -128
 horizon_level = 0.0
-sun_altitude = -55.5085
-sun_azimuth = -131.292
+sun_altitude = -47.0867
+sun_azimuth = -141.94
 sun_disk_color = Color(0.996094, 0.541334, 0.140076, 1)
 sun_disk_intensity = 2.0
 sun_disk_size = 0.015
@@ -98,8 +97,8 @@ sun_light_path = NodePath("../SunLight")
 sun_light_color = Color(1, 1, 1, 1)
 sun_horizon_light_color = Color(0.98, 0.523, 0.294, 1)
 sun_light_energy = 1.0
-moon_altitude = -57.3363
-moon_azimuth = -244.6
+moon_altitude = -68.1019
+moon_azimuth = -249.826
 moon_color = Color(1, 1, 1, 1)
 moon_size = 0.07
 enable_set_moon_texture = false
@@ -107,7 +106,7 @@ moon_resolution = 2
 moon_light_path = NodePath("../MoonLight")
 moon_light_color = Color(0.572549, 0.776471, 0.956863, 1)
 moon_light_energy = 0.3
-deep_space_euler = Vector3(1.29154, 3.14159, 1.87008)
+deep_space_euler = Vector3(1.29154, -3.14159, 1.6477)
 background_color = Color(0.709804, 0.709804, 0.709804, 0.854902)
 set_background_texture = false
 stars_field_color = Color(1, 1, 1, 1)
@@ -174,7 +173,7 @@ script = ExtResource("3_lquwl")
 dome_path = NodePath("../Skydome")
 system_sync = false
 total_cycle_in_minutes = 1217.8
-total_hours = 9.15931
+total_hours = 10.0062
 day = 14
 month = 1
 year = 2025

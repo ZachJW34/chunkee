@@ -1,6 +1,6 @@
 use crate::{
     block::{ChunkeeVoxel, Rotation, VoxelId},
-    coords::{AABB, ChunkVector, WorldVector, wv_to_cv, wv_to_lv},
+    coords::{ChunkVector, WorldVector, wv_to_cv, wv_to_lv},
     generation::VoxelGenerator,
     grid::ChunkGrid,
     meshing::ChunkMeshGroup,
@@ -163,7 +163,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         }
     }
 
-    pub fn raycast_hit(
+    pub fn try_raycast(
         &mut self,
         ray_origin: Vec3,
         ray_direction: Vec3,
@@ -175,8 +175,11 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         for _ in 0..(max_steps as usize) {
             let pos = dda.next_voxelpos;
             let cv = wv_to_cv(pos);
-            if let Some(grid) = self.grid.try_read()
-                && let Some(rw) = grid.get(cv)
+            let maybe_rw = self
+                .grid
+                .try_read()
+                .and_then(|grid_r| grid_r.get(cv).cloned());
+            if let Some(rw) = maybe_rw
                 && let Some(world_chunk) = rw.try_read()
                 && world_chunk.is_stable()
             {

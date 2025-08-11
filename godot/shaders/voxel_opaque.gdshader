@@ -37,5 +37,5 @@ void fragment() {
  	  ALBEDO = srgb_to_linear(albedo_rgb);
 	  ALBEDO *= mix(1.0, pow(aord_rgb.r, 2.0), ao_intensity);
     NORMAL = apply_normal_map(TANGENT, BINORMAL, NORMAL, normal_map_rgb);
-	  ROUGHNESS = aord_rgb.g;
+	  ROUGHNESS = 1.0;
 }

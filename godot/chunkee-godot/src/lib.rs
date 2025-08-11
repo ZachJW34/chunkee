@@ -41,7 +41,7 @@ pub struct ChunkeeWorldNode {
     physics_debug_meshes: VoxelHashMap<Gd<MeshInstance3D>>,
     voxel_hit: Option<(WorldVector, MyVoxels)>,
     outline_node: Option<Gd<MeshInstance3D>>,
-    metrics: Metrics<RenderMetrics>,
+    metrics: Metrics<ChunkeeWorldNodeMetrics>,
 
     pub show_physics_debug_mesh: bool,
     #[export]
@@ -57,7 +57,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
         env_logger::init();
         println!("Initializing ChunkeeWorldNode");
-        let voxel_size = 1.0;
+        let voxel_size = 0.25;
         let config = ChunkeeWorldConfig {
             radius: 16,
             generator: Box::new(WorldGenerator::new()),
@@ -91,6 +91,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
 
     fn process(&mut self, _delta: f64) {
         if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
+            let process_time = Instant::now();
             let camera_pos = Vec3::from_array(camera.get_global_position().to_array());
             self.voxel_world.update(camera.to_camera_data());
             let input = Input::singleton();
@@ -103,9 +104,11 @@ impl IStaticBody3D for ChunkeeWorldNode {
             }
 
             let forward_direction = -camera.get_global_transform().basis.col_c();
+
+            let raycast_time = Instant::now();
             match self
                 .voxel_world
-                .raycast_hit(camera_pos, forward_direction.as_vec3(), 20)
+                .try_raycast(camera_pos, forward_direction.as_vec3(), 20)
             {
                 VoxelRaycast::Hit(hit) => {
                     self.voxel_hit = Some(hit);
@@ -113,6 +116,9 @@ impl IStaticBody3D for ChunkeeWorldNode {
                 VoxelRaycast::Miss => self.voxel_hit = None,
                 VoxelRaycast::None => {}
             }
+            self.metrics
+                .get_mut(ChunkeeWorldNodeMetrics::Raycast)
+                .record(raycast_time.elapsed());
 
             if input.is_action_pressed("break_block")
                 && let Some(hit) = self.voxel_hit.as_ref()
@@ -138,7 +144,10 @@ impl IStaticBody3D for ChunkeeWorldNode {
 
             self.render();
 
-            // self.metrics.batch_print();
+            self.metrics
+                .get_mut(ChunkeeWorldNodeMetrics::Process)
+                .record(process_time.elapsed());
+            self.metrics.batch_print();
         } else {
             println!("Cannot update without camera")
         }
@@ -176,15 +185,17 @@ const ARRAY_INDEX: usize = 12;
 const ARRAY_MAX: usize = 13;
 
 define_metrics! {
-  enum RenderMetrics {
-      ChunkMeshRender => "Render::ChunkMesh",
-  }
+    enum ChunkeeWorldNodeMetrics {
+        Process => "ChunkeeWorldNode::process",
+        Render => "ChunkeeWorldNode::render",
+        Raycast => "ChunkeeWorld::try_raycast"
+    }
 }
 
 #[godot_api]
 impl ChunkeeWorldNode {
     fn render(&mut self) {
-        // let render_time = Instant::now();
+        let mesh_render_time = Instant::now();
         let array_format = ArrayFormat::VERTEX
             | ArrayFormat::NORMAL
             | ArrayFormat::TANGENT
@@ -193,8 +204,16 @@ impl ChunkeeWorldNode {
             | ArrayFormat::CUSTOM0
             | ArrayFormat::from_ord(4 << ArrayFormat::CUSTOM0_SHIFT.ord());
 
-        while let Some(cv) = self.voxel_world.results.mesh_unload.pop() {
-            if let Some(mut node) = self.rendered_chunks.remove(&cv) {
+        let drain_limit = 100;
+
+        for _ in 0..drain_limit {
+            if self.voxel_world.results.mesh_unload.is_empty() {
+                break;
+            }
+
+            if let Some(cv) = self.voxel_world.results.mesh_unload.pop()
+                && let Some(mut node) = self.rendered_chunks.remove(&cv)
+            {
                 node.queue_free();
             }
         }
@@ -203,9 +222,7 @@ impl ChunkeeWorldNode {
             &self.opaque_material.clone(),
             &self.translucent_material.clone(),
         ) {
-            let mesh_render_time = Instant::now();
             let mesh_queue_len = self.voxel_world.results.mesh_load.len();
-            let drain_limit = 100;
 
             for _ in 0..drain_limit {
                 if self.voxel_world.results.mesh_load.is_empty() {
@@ -238,12 +255,6 @@ impl ChunkeeWorldNode {
                 }
             }
 
-            if mesh_queue_len > 0 {
-                self.metrics
-                    .get_mut(RenderMetrics::ChunkMeshRender)
-                    .record(mesh_render_time.elapsed());
-            }
-
             if let Some(outline_node) = self.outline_node.as_mut() {
                 if let Some((pos, _)) = self.voxel_hit {
                     let new_pos =
@@ -253,6 +264,12 @@ impl ChunkeeWorldNode {
                 } else {
                     outline_node.set_visible(false);
                 }
+            }
+
+            if mesh_queue_len > 0 {
+                self.metrics
+                    .get_mut(ChunkeeWorldNodeMetrics::Render)
+                    .record(mesh_render_time.elapsed());
             }
         }
 

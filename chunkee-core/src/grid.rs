@@ -1,148 +1,167 @@
-use std::{collections::HashMap, time::Instant};
-
+use arc_swap::ArcSwap;
 use glam::IVec3;
+use parking_lot::RwLock;
 
 use crate::{
-    block::{BLOCK_FACES, ChunkeeVoxel, VoxelId},
-    chunk::{ChunkLOD, LOD},
-    coords::{ChunkVector, camera_vec3_to_cv},
-    hasher::BuildMortonHasher,
-    streaming::CameraData,
+    block::BLOCK_FACES,
+    coords::ChunkVector,
+    pipeline::{ChunkState, PhysicsState, WorldChunk},
 };
 
-#[derive(Debug, Clone)]
-pub struct Deltas(pub HashMap<ChunkVector, VoxelId, BuildMortonHasher>);
-
-impl Default for Deltas {
-    fn default() -> Self {
-        Self(Default::default())
-    }
+pub struct ChunkPool {
+    pub flat: Vec<RwLock<WorldChunk>>,
 }
 
-pub fn neighbors_of(cv: IVec3) -> [ChunkVector; 6] {
-    BLOCK_FACES.map(|face| cv + face.into_normal())
-}
+impl ChunkPool {
+    pub fn new(radius: u32) -> Self {
+        let max_length = 2 * radius + 1;
+        let capacity = max_length.pow(3);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PipelineState {
-    DeltasNeeded,
-    DeltasLoading,
-    GenerationNeeded,
-    Generating,
-    MeshNeeded,
-    Meshing,
-    MeshReady,
-}
-
-#[derive(Debug, Clone)]
-pub struct WorldChunk {
-    pub cv: ChunkVector,
-    // pub io_state: IOState,
-    pub state: PipelineState,
-    pub chunk_lod: ChunkLOD,
-    pub deltas: Deltas,
-    pub is_dirty: bool,
-    pub priority: u32,
-    // Some if the generator produced a chunk composed entirely of one voxel type
-    pub uniform_voxel_id: Option<VoxelId>,
-}
-
-impl Default for WorldChunk {
-    fn default() -> Self {
         Self {
-            cv: ChunkVector::MAX,
-            // io_state: IOState::DeltasNeeded,
-            state: PipelineState::DeltasNeeded,
-            chunk_lod: ChunkLOD::new(3),
-            deltas: Deltas::default(),
-            is_dirty: false,
-            priority: 0,
-            uniform_voxel_id: None,
+            flat: (0..capacity)
+                .map(|_| RwLock::new(WorldChunk::default()))
+                .collect(),
         }
     }
 }
 
-impl WorldChunk {
-    pub fn new(cv: ChunkVector, lod: LOD, priority: u32) -> Self {
-        Self {
-            cv,
-            // io_state: IOState::DeltasNeeded,
-            state: PipelineState::DeltasNeeded,
-            chunk_lod: ChunkLOD::new(lod),
-            deltas: Deltas::default(),
-            is_dirty: false,
-            priority,
-            uniform_voxel_id: None,
-        }
-    }
+pub const FREE_GRID_IDX: usize = usize::MAX;
 
-    pub fn merge_deltas<V: ChunkeeVoxel>(&mut self) {
-        let lod_scale_factor = self.chunk_lod.lod_scale_factor() as i32;
-
-        for (lv, voxel_id) in self.deltas.0.iter() {
-            let lv_scaled = *lv / lod_scale_factor;
-            self.chunk_lod.set_voxel::<V>(lv_scaled, *voxel_id);
-        }
-    }
-
-    pub fn is_stable(&self) -> bool {
-        matches!(
-            self.state,
-            PipelineState::MeshNeeded | PipelineState::Meshing | PipelineState::MeshReady
-        )
-    }
-}
-
-pub enum GridOp<'a> {
-    Recycle(&'a mut WorldChunk, ChunkVector),
-    Keep(&'a mut WorldChunk),
-}
-
-pub struct ChunkGrid {
-    pub chunks: Vec<WorldChunk>,
-    indices: Vec<usize>,
+#[derive(Clone)]
+pub struct GridView {
+    pub indices: Vec<usize>,
     pub dimensions: IVec3,
     pub grid_origin: IVec3,
+    pub grid_anchor: IVec3,
+    pub initialized: bool,
 }
 
-impl ChunkGrid {
-    pub fn new(radius_x: u32, radius_y: u32, radius_z: u32) -> Self {
-        let dims = IVec3::new(
-            2 * radius_x as i32 + 1,
-            2 * radius_y as i32 + 1,
-            2 * radius_z as i32 + 1,
-        );
-        let capacity = (dims.x * dims.y * dims.z) as usize;
+pub type ChunkResetTask = (usize, ChunkVector);
+
+impl GridView {
+    const SNAP_DISTANCE: i32 = 4;
+    const TRIGGER_RADIUS: i32 = 4;
+
+    pub fn new(radius: u32) -> Self {
+        let max_length = 2 * radius + 1;
+        let capacity = max_length.pow(3) as usize;
 
         Self {
-            chunks: vec![WorldChunk::default(); capacity],
             indices: (0..capacity).collect(),
-            dimensions: dims,
+            dimensions: IVec3::splat(max_length as i32),
             grid_origin: IVec3::MAX,
+            grid_anchor: IVec3::MAX,
+            initialized: false,
         }
     }
 
-    pub fn get(&self, cv: IVec3) -> Option<&WorldChunk> {
-        let grid_idx = Self::cv_to_idx_with_origin(cv, self.grid_origin, self.dimensions)?;
-        let chunk_idx = self.indices.get(grid_idx)?;
-        let chunk = self.chunks.get(*chunk_idx)?;
+    pub fn needs_update(&self, camera_cv: ChunkVector) -> bool {
+        if !self.initialized {
+            return true;
+        }
 
-        (chunk.cv == cv).then_some(chunk)
+        let dist_from_anchor = (camera_cv - self.grid_anchor).abs().max_element();
+
+        dist_from_anchor > Self::TRIGGER_RADIUS
     }
 
-    pub fn get_mut(&mut self, cv: IVec3) -> Option<&mut WorldChunk> {
-        let grid_idx = Self::cv_to_idx_with_origin(cv, self.grid_origin, self.dimensions)?;
-        let chunk_idx = self.indices.get(grid_idx)?;
-        let chunk = self.chunks.get_mut(*chunk_idx)?;
-
-        (chunk.cv == cv).then_some(chunk)
+    pub fn is_frontier(&self, cv: IVec3) -> bool {
+        for face in BLOCK_FACES {
+            let neighbor_cv = cv + face.into_normal();
+            if self.cv_to_idx_with_origin(neighbor_cv).is_none() {
+                return true;
+            }
+        }
+        false
     }
 
-    fn cv_to_idx_with_origin(cv: IVec3, origin: IVec3, dims: IVec3) -> Option<usize> {
+    pub fn compute_new(
+        old_view: &GridView,
+        camera_cv: ChunkVector,
+    ) -> (Self, Vec<ChunkResetTask>, Vec<ChunkVector>) {
+        let mut new_view = old_view.clone();
+
+        if !new_view.initialized {
+            let snap_block_origin = IVec3::new(
+                (camera_cv.x >> 2) << 2,
+                (camera_cv.y >> 2) << 2,
+                (camera_cv.z >> 2) << 2,
+            );
+            new_view.grid_anchor = snap_block_origin + IVec3::splat(Self::SNAP_DISTANCE / 2);
+            new_view.grid_origin = new_view.grid_anchor - new_view.dimensions / 2;
+            let new_indices: Vec<_> = (0..old_view.indices.len()).collect();
+            new_view.indices = new_indices.clone();
+            new_view.initialized = true;
+
+            let reset_tasks = (0..new_view.indices.len())
+                .map(|idx| {
+                    let new_cv =
+                        new_view.grid_origin + Self::idx_to_local(idx, new_view.dimensions);
+                    (idx, new_cv)
+                })
+                .collect();
+
+            return (new_view, reset_tasks, Vec::new());
+        }
+
+        let direction = (camera_cv - new_view.grid_anchor).signum();
+        new_view.grid_anchor += direction * Self::SNAP_DISTANCE;
+        new_view.grid_origin = new_view.grid_anchor - new_view.dimensions / 2;
+
+        let mut new_indices = vec![FREE_GRID_IDX; old_view.indices.len()];
+        let mut used_chunks = vec![false; old_view.indices.len()];
+        let mut remesh_cvs = Vec::new();
+
+        for old_grid_idx in 0..old_view.indices.len() {
+            let chunk_idx = old_view.indices[old_grid_idx];
+
+            let local_pos = Self::idx_to_local(old_grid_idx, old_view.dimensions);
+            let cv = old_view.grid_origin + local_pos;
+
+            if let Some(new_grid_idx) = new_view.cv_to_idx_with_origin(cv) {
+                new_indices[new_grid_idx] = chunk_idx;
+                used_chunks[chunk_idx] = true;
+
+                if old_view.is_frontier(cv) && !new_view.is_frontier(cv) {
+                    remesh_cvs.push(cv);
+                }
+            }
+        }
+
+        let mut recycled_chunk_indices: Vec<_> = (0..old_view.indices.len())
+            .filter(|&i| !used_chunks[i])
+            .collect();
+
+        let mut reset_tasks = Vec::new();
+
+        for new_grid_idx in 0..new_indices.len() {
+            if new_indices[new_grid_idx] == FREE_GRID_IDX {
+                let recycled_chunk_idx = recycled_chunk_indices.pop().expect("Mismatch");
+                new_indices[new_grid_idx] = recycled_chunk_idx;
+
+                let new_cv =
+                    new_view.grid_origin + Self::idx_to_local(new_grid_idx, new_view.dimensions);
+
+                reset_tasks.push((recycled_chunk_idx, new_cv));
+            }
+        }
+
+        new_view.indices = new_indices;
+
+        (new_view, reset_tasks, remesh_cvs)
+    }
+
+    pub fn cv_to_idx_with_origin(&self, cv: IVec3) -> Option<usize> {
+        let origin = self.grid_origin;
+        let dims = self.dimensions;
         let local = cv - origin;
-        if (0..dims.x).contains(&local.x)
-            && (0..dims.y).contains(&local.y)
-            && (0..dims.z).contains(&local.z)
+
+        if local.x >= 0
+            && local.x < dims.x
+            && local.y >= 0
+            && local.y < dims.y
+            && local.z >= 0
+            && local.z < dims.z
         {
             Some((local.x + local.y * dims.x + local.z * dims.x * dims.y) as usize)
         } else {
@@ -156,75 +175,109 @@ impl ChunkGrid {
         let z = idx as i32 / (dims.x * dims.y);
         IVec3::new(x, y, z)
     }
+}
 
-    pub fn shift_and_remap<F>(&mut self, camera_data: &CameraData, mut on_remap: F) -> bool
-    where
-        F: FnMut(GridOp),
-    {
-        let camera_cv = camera_vec3_to_cv(camera_data.pos);
-        let dims = self.dimensions;
-        let new_origin = camera_cv - (dims / 2);
+pub struct ChunkManager {
+    pub pool: ChunkPool,
+    pub view: ArcSwap<GridView>,
+}
 
-        if new_origin == self.grid_origin {
-            return false;
+impl ChunkManager {
+    pub fn new(radius: u32) -> Self {
+        Self {
+            pool: ChunkPool::new(radius),
+            view: ArcSwap::new(GridView::new(radius).into()),
         }
-
-        let t = Instant::now();
-
-        if self.grid_origin == IVec3::MAX {
-            self.grid_origin = new_origin;
-            for i in 0..self.chunks.len() {
-                let local = Self::idx_to_local(i, dims);
-                let new_cv = new_origin + local;
-                on_remap(GridOp::Recycle(&mut self.chunks[i], new_cv));
-                self.indices[i] = i;
-            }
-            println!("{camera_cv} [shift_and_remap] init: {:?}", t.elapsed());
-            return true;
-        }
-
-        self.grid_origin = new_origin;
-
-        let mut new_indices = vec![usize::MAX; self.chunks.len()];
-        let mut used_chunks = vec![false; self.chunks.len()];
-
-        // Pass 1: Preserve chunks that are still visible and issue `Keep` callbacks.
-        for old_grid_idx in 0..self.indices.len() {
-            let chunk_idx = self.indices[old_grid_idx];
-            let cv = self.chunks[chunk_idx].cv;
-
-            if let Some(new_grid_idx) = Self::cv_to_idx_with_origin(cv, new_origin, dims) {
-                new_indices[new_grid_idx] = chunk_idx;
-                used_chunks[chunk_idx] = true;
-                on_remap(GridOp::Keep(&mut self.chunks[chunk_idx]));
-            }
-        }
-
-        // Pass 2: Collect indices of chunks that are no longer used.
-        let mut recycled_indices: Vec<_> = (0..self.chunks.len())
-            .filter(|&i| !used_chunks[i])
-            .collect();
-
-        // Pass 3: Fill empty slots in the new grid with recycled chunks and issue `Recycle` callbacks.
-        for new_grid_idx in 0..new_indices.len() {
-            if new_indices[new_grid_idx] == usize::MAX {
-                let recycled_chunk_idx =
-                    recycled_indices.pop().expect("Not enough recycled chunks");
-                new_indices[new_grid_idx] = recycled_chunk_idx;
-
-                let local = Self::idx_to_local(new_grid_idx, dims);
-                let new_cv = new_origin + local;
-
-                on_remap(GridOp::Recycle(
-                    &mut self.chunks[recycled_chunk_idx],
-                    new_cv,
-                ));
-            }
-        }
-
-        self.indices = new_indices;
-
-        println!("{} [shift_and_remap]: {:?}", camera_cv, t.elapsed());
-        true
     }
+
+    pub fn read<F, R>(&self, cv: ChunkVector, f: F) -> Option<R>
+    where
+        F: FnOnce(&WorldChunk) -> R,
+    {
+        let world_chunk = self.get_lock(cv)?.read();
+
+        if world_chunk.cv == cv {
+            Some(f(&world_chunk))
+        } else {
+            None
+        }
+    }
+
+    pub fn try_read<F, R>(&self, cv: ChunkVector, f: F) -> Option<R>
+    where
+        F: FnOnce(&WorldChunk) -> R,
+    {
+        let world_chunk = self.get_lock(cv)?.try_read()?;
+
+        if world_chunk.cv == cv {
+            Some(f(&world_chunk))
+        } else {
+            None
+        }
+    }
+
+    pub fn write<F, R>(&self, cv: ChunkVector, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut WorldChunk) -> R,
+    {
+        let mut world_chunk = self.get_lock(cv)?.write();
+
+        if world_chunk.cv == cv {
+            Some(f(&mut world_chunk))
+        } else {
+            None
+        }
+    }
+
+    pub fn check<F>(&self, cv: ChunkVector, f: F) -> bool
+    where
+        F: FnOnce(&WorldChunk) -> bool,
+    {
+        if let Some(rw) = self.get_lock(cv) {
+            let world_chunk = rw.read();
+
+            if world_chunk.cv == cv {
+                return f(&world_chunk);
+            }
+        }
+
+        false
+    }
+
+    fn get_lock(&self, cv: ChunkVector) -> Option<&RwLock<WorldChunk>> {
+        let view = self.view.load();
+        let grid_idx = view.cv_to_idx_with_origin(cv)?;
+        let chunk_idx = *view.indices.get(grid_idx)?;
+        self.pool.flat.get(chunk_idx)
+    }
+}
+
+pub fn check_chunk_stable(world_chunk: &WorldChunk, cv: ChunkVector) -> bool {
+    world_chunk.cv == cv && world_chunk.is_stable()
+}
+
+pub fn check_chunk_p(world_chunk: &WorldChunk, cv: ChunkVector, state: PhysicsState) -> bool {
+    world_chunk.cv == cv && world_chunk.physics_state == state
+}
+
+pub fn check_chunk_s(world_chunk: &WorldChunk, cv: ChunkVector, state: ChunkState) -> bool {
+    world_chunk.cv == cv && world_chunk.state == state
+}
+
+pub fn check_chunk_sv(
+    world_chunk: &WorldChunk,
+    cv: ChunkVector,
+    state: ChunkState,
+    version: u32,
+) -> bool {
+    world_chunk.cv == cv && world_chunk.state == state && world_chunk.version == version
+}
+
+pub fn check_chunk_pv(
+    world_chunk: &WorldChunk,
+    cv: ChunkVector,
+    state: PhysicsState,
+    version: u32,
+) -> bool {
+    world_chunk.cv == cv && world_chunk.physics_state == state && world_chunk.version == version
 }

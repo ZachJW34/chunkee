@@ -1,0 +1,61 @@
+[2025-07-28T20:28:07Z INFO  chunkee_core::metrics] [Metrics]
+        (Pipeline::loop) avg=44µs | ema=648µs | max=16.909ms | min=10µs | cnt=92366
+        (Grid::update) avg=3.595ms | ema=4.748ms | max=9.671ms | min=2.22ms | cnt=7
+        (Task::IO) avg=15.277ms | ema=24.433ms | max=64.178ms | min=190µs | cnt=7
+        (Task::Generation) avg=7.118ms | ema=16.161ms | max=58.293ms | min=47µs | cnt=3933
+        (Task::Mesh) avg=1.577ms | ema=3.302ms | max=27.398ms | min=385µs | cnt=7914
+        (Task::Physics) avg=1.203ms | ema=1.641ms | max=2.897ms | min=343µs | cnt=58
+[2025-07-28T20:28:07Z INFO  chunkee_core::metrics] [Metrics]
+        (Render::ChunkMesh) avg=1.612ms | ema=4.201ms | max=7.992ms | min=12µs | cnt=235
+
+[2025-07-28T20:29:10Z INFO  chunkee_core::metrics] [Metrics]
+        (Pipeline::loop) avg=46µs | ema=1.384ms | max=38.429ms | min=10µs | cnt=89241
+        (Grid::update) avg=3.116ms | ema=3.664ms | max=6.678ms | min=1.727ms | cnt=7
+        (Task::IO) avg=14.939ms | ema=24.202ms | max=63.687ms | min=182µs | cnt=7
+        (Task::Generation) avg=7.161ms | ema=12.378ms | max=54.535ms | min=47µs | cnt=3933
+        (Task::Mesh) avg=1.532ms | ema=2.534ms | max=16.182ms | min=384µs | cnt=7914
+        (Task::Physics) avg=1.162ms | ema=1.172ms | max=2.119ms | min=339µs | cnt=58
+[2025-07-28T20:29:10Z INFO  chunkee_core::metrics] [Metrics]
+        (Render::ChunkMesh) avg=1.545ms | ema=4.658ms | max=7.779ms | min=8µs | cnt=234
+
+//
+
+[2025-07-28T21:39:34Z INFO  chunkee_core::metrics] [Metrics]
+        (Pipeline::loop) avg=77µs | ema=881µs | max=28.198ms | min=10µs | cnt=39061
+        (Grid::update) avg=730µs | ema=921µs | max=1.804ms | min=428µs | cnt=7
+        (Task::IO) avg=6.495ms | ema=12.689ms | max=40.471ms | min=255µs | cnt=7
+        (Task::Generation) avg=6.152ms | ema=7.367ms | max=41.449ms | min=28µs | cnt=3055
+        (Task::Mesh) avg=1.565ms | ema=2.475ms | max=26.915ms | min=361µs | cnt=7618
+        (Task::Physics) avg=1.347ms | ema=1.727ms | max=4.969ms | min=334µs | cnt=58
+[2025-07-28T21:39:34Z INFO  chunkee_core::metrics] [Metrics]
+        (Render::ChunkMesh) avg=1.628ms | ema=3.955ms | max=8.813ms | min=13µs | cnt=214
+
+[2025-07-28T21:41:30Z INFO  chunkee_core::metrics] [Metrics]
+        (Pipeline::loop) avg=70µs | ema=2.236ms | max=24.588ms | min=10µs | cnt=45857
+        (Grid::update) avg=887µs | ema=1.015ms | max=1.674ms | min=464µs | cnt=7
+        (Task::IO) avg=6.439ms | ema=12.565ms | max=39.917ms | min=397µs | cnt=7
+        (Task::Generation) avg=6.195ms | ema=9.817ms | max=95.174ms | min=29µs | cnt=3055
+        (Task::Mesh) avg=1.568ms | ema=2.985ms | max=17.892ms | min=360µs | cnt=7618
+        (Task::Physics) avg=1.142ms | ema=1.921ms | max=4.067ms | min=328µs | cnt=58
+[2025-07-28T21:41:30Z INFO  chunkee_core::metrics] [Metrics]
+        (Render::ChunkMesh) avg=1.647ms | ema=4.3ms | max=8.98ms | min=26µs | cnt=213
+
+2025-07-30T05:34:29Z INFO  chunkee_core::metrics] [Metrics]
+        (Pipeline::loop) avg=198µs | ema=753µs | max=27.078ms | min=10µs | cnt=10753
+        (Grid::update) avg=946µs | ema=1.107ms | max=1.2ms | min=692µs | cnt=2
+        (Task::IO) avg=33µs | ema=43µs | max=9.808ms | min=0ns | cnt=6069
+        (Task::Generation) avg=6.063ms | ema=8.342ms | max=30.51ms | min=27µs | cnt=1679
+        (Task::Mesh) avg=1.478ms | ema=6.079ms | max=19.578ms | min=362µs | cnt=6176
+        (Task::Physics) avg=1.198ms | ema=1.322ms | max=2.885ms | min=331µs | cnt=59
+[2025-07-30T05:34:29Z INFO  chunkee_core::metrics] [Metrics]
+        (Render::ChunkMesh) avg=1.695ms | ema=3.347ms | max=8.961ms | min=9µs | cnt=144
+
+[2025-07-30T05:35:45Z INFO  chunkee_core::metrics] [Metrics]
+        (Pipeline::loop) avg=205µs | ema=732µs | max=28.821ms | min=11µs | cnt=10492
+        (Grid::update) avg=1.025ms | ema=1.383ms | max=1.588ms | min=462µs | cnt=2
+        (Task::IO) avg=29µs | ema=75µs | max=8.181ms | min=0ns | cnt=6069
+        (Task::Generation) avg=6.027ms | ema=8.06ms | max=37.52ms | min=26µs | cnt=1679
+        (Task::Mesh) avg=1.525ms | ema=3.984ms | max=32.954ms | min=363µs | cnt=6164
+        (Task::Physics) avg=989µs | ema=1.659ms | max=2.585ms | min=369µs | cnt=49
+[2025-07-30T05:35:47Z INFO  chunkee_core::metrics] [Metrics]
+        (Render::ChunkMesh) avg=1.545ms | ema=3.466ms | max=6.504ms | min=6µs | cnt=144

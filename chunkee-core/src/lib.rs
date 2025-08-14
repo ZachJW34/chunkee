@@ -5,6 +5,7 @@ pub mod generation;
 pub mod grid;
 pub mod hasher;
 pub mod meshing;
+pub mod metrics;
 pub mod pipeline;
 pub mod storage;
 pub mod streaming;

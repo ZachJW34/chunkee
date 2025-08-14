@@ -38,7 +38,7 @@ void vertex() {
 	layer_idx = CUSTOM0.x;
 
 	// If the block is water (layer 4), animate its vertices to create waves
-	if (layer_idx == 4.0) {
+	if (layer_idx == 999.0) {
 		vec2 time_offset = (wave_direction * TIME * wave_speed);
 		// Sample noise using world position for seamless waves across blocks
 		float noise = texture(noise_texture, VERTEX.xz * 0.1 + time_offset).r;
@@ -48,7 +48,7 @@ void vertex() {
 
 void fragment() {
 	// Check if the current fragment is water
-	if (layer_idx == 4.0) {
+	if (layer_idx == 999.0) {
     // --- 💧 Water Rendering Logic ---
 	    vec2 time_offset1 = (wave_direction * TIME * wave_speed);
 	    vec2 time_offset2 = (vec2(0.5, 1.0) * TIME * wave_speed * 0.7);
@@ -93,6 +93,6 @@ void fragment() {
 		ALBEDO *= mix(1.0, pow(aord_rgb.r, 2.0), ao_intensity);
 		NORMAL = apply_normal_map(TANGENT, BINORMAL, NORMAL, normal_map_rgb);
 		ROUGHNESS = aord_rgb.g;
-		ALPHA = 1.0; // Standard blocks are fully opaque
+		ALPHA = 0.25; // Standard blocks are fully opaque
 	}
 }

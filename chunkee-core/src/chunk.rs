@@ -2,7 +2,10 @@ use block_mesh::ndshape::{ConstShape, ConstShape3u32};
 use glam::IVec3;
 
 use crate::{
-    block::{ChunkeeVoxel, Rotation, VoxelId, VoxelVisibility},
+    block::{
+        BlockFace, ChunkeeVoxel, NeighborsMask, Rotation, VoxelId, VoxelVisibility,
+        neighbors_mask_to_faces,
+    },
     coords::LocalVector,
 };
 
@@ -76,6 +79,40 @@ impl Chunk {
         let max = IVec3::splat(Self::SIDE - 1);
 
         (lv.cmpeq(min) | lv.cmpeq(max)).any()
+    }
+
+    fn get_voxel_edge_faces_mask(&self, lv: IVec3) -> NeighborsMask {
+        let mut mask: NeighborsMask = 0;
+        let max = Self::SIDE - 1;
+
+        if lv.x == 0 {
+            mask |= 1 << (BlockFace::Left as u8);
+        }
+        if lv.x == max {
+            mask |= 1 << (BlockFace::Right as u8);
+        }
+
+        if lv.y == 0 {
+            mask |= 1 << (BlockFace::Bottom as u8);
+        }
+        if lv.y == max {
+            mask |= 1 << (BlockFace::Top as u8);
+        }
+
+        if lv.z == 0 {
+            mask |= 1 << (BlockFace::Front as u8);
+        }
+        if lv.z == max {
+            mask |= 1 << (BlockFace::Back as u8);
+        }
+
+        mask
+    }
+
+    pub fn get_voxel_edge_faces(&self, lv: IVec3) -> (NeighborsMask, [Option<BlockFace>; 6]) {
+        let mask = self.get_voxel_edge_faces_mask(lv);
+
+        (mask, neighbors_mask_to_faces(mask))
     }
 
     pub fn is_uniform(&self) -> Option<VoxelId> {

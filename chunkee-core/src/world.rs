@@ -2,7 +2,7 @@ use crate::{
     block::{ChunkeeVoxel, Rotation, VoxelId},
     coords::{ChunkVector, WorldVector, wv_to_cv, wv_to_lv},
     generation::VoxelGenerator,
-    grid::ChunkGrid,
+    grid::ChunkManager,
     meshing::ChunkMeshGroup,
     pipeline::{PhysicsEntity, PipelineMessage, spawn_pipeline_thread},
     storage::ChunkStore,
@@ -13,7 +13,6 @@ use block_mesh::VoxelVisibility;
 use crossbeam::queue::SegQueue;
 use crossbeam_channel::Sender;
 use glam::{IVec3, Vec3};
-use parking_lot::RwLock;
 use std::{marker::PhantomData, sync::Arc, thread::JoinHandle};
 
 pub struct ChunkeeWorldConfig {
@@ -26,7 +25,6 @@ pub type MeshQueue = SegQueue<(ChunkVector, ChunkMeshGroup)>;
 pub type PhysicsMeshQueue = SegQueue<(ChunkVector, Vec<Vec3>)>;
 pub type UnloadQueue = SegQueue<ChunkVector>;
 pub type EditsAppliedQueue = SegQueue<(IVec3, VoxelId)>;
-pub type WorldGrid = Arc<RwLock<ChunkGrid>>;
 
 pub struct ResultQueues {
     pub mesh_load: SegQueue<(ChunkVector, ChunkMeshGroup)>,
@@ -39,7 +37,7 @@ pub struct ResultQueues {
 pub struct ChunkeeWorld<V: ChunkeeVoxel> {
     pub results: Arc<ResultQueues>,
     pub radius: u32,
-    grid: WorldGrid,
+    chunk_manager: Arc<ChunkManager>,
     camera_pos: Vec3,
     chunk_store: Arc<ChunkStore>,
     pipeline: Option<Pipeline>,
@@ -57,7 +55,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         } = config;
 
         let chunk_store = Arc::new(ChunkStore::new());
-        let grid = Arc::new(RwLock::new(ChunkGrid::new(radius)));
+        let chunk_manager = Arc::new(ChunkManager::new(radius));
         let generator = Arc::new(generator);
         let results = Arc::new(ResultQueues {
             mesh_load: SegQueue::new(),
@@ -69,7 +67,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
 
         Self {
             results,
-            grid,
+            chunk_manager,
             chunk_store,
             radius,
             generator,
@@ -84,7 +82,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         if self.pipeline.is_none() {
             let (pipeline_sender, pipeline_receiver) = crossbeam_channel::unbounded();
             let pipeline_handle = spawn_pipeline_thread::<V>(
-                self.grid.clone(),
+                self.chunk_manager.clone(),
                 self.chunk_store.clone(),
                 self.generator.clone(),
                 pipeline_receiver,
@@ -175,22 +173,25 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         for _ in 0..(max_steps as usize) {
             let pos = dda.next_voxelpos;
             let cv = wv_to_cv(pos);
-            let maybe_rw = self
-                .grid
-                .try_read()
-                .and_then(|grid_r| grid_r.get(cv).cloned());
-            if let Some(rw) = maybe_rw
-                && let Some(world_chunk) = rw.try_read()
-                && world_chunk.is_stable()
-            {
-                let lv = wv_to_lv(pos);
-                let voxel_id = world_chunk.chunk.get_voxel(lv);
-                let voxel = V::from(voxel_id.type_id());
-                if voxel.visibilty() != VoxelVisibility::Empty {
-                    return VoxelRaycast::Hit((pos, voxel));
+            if let Some(res) = self.chunk_manager.try_read(cv, |wc| {
+                if !wc.is_stable() {
+                    return Some(VoxelRaycast::None);
                 }
 
-                dda.step_mut();
+                let lv = wv_to_lv(pos);
+                let voxel_id = wc.chunk.get_voxel(lv);
+                let voxel = V::from(voxel_id.type_id());
+                if voxel.visibilty() != VoxelVisibility::Empty {
+                    return Some(VoxelRaycast::Hit((pos, voxel)));
+                }
+
+                None
+            }) {
+                if let Some(vr) = res {
+                    return vr;
+                } else {
+                    dda.step_mut();
+                }
             } else {
                 return VoxelRaycast::None;
             }

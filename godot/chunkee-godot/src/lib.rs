@@ -58,9 +58,9 @@ impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
         env_logger::init();
         println!("Initializing ChunkeeWorldNode");
-        let voxel_size = 1.0;
+        let voxel_size = 0.1;
         let config = ChunkeeWorldConfig {
-            radius: 16,
+            radius: 12,
             generator: Box::new(WorldGenerator::new()),
             voxel_size,
         };
@@ -117,7 +117,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
             let raycast_time = Instant::now();
             self.voxel_raycast =
                 self.voxel_world
-                    .try_raycast(camera_pos, forward_direction.as_vec3(), 10);
+                    .try_raycast(camera_pos, forward_direction.as_vec3(), 100);
             self.metrics
                 .get_mut(ChunkeeWorldNodeMetrics::Raycast)
                 .record(raycast_time.elapsed());

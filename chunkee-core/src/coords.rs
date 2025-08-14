@@ -45,7 +45,7 @@ pub fn idx_to_lv(idx: usize) -> IVec3 {
 }
 
 #[inline(always)]
-pub fn camera_vec3_to_cv(pos: Vec3, voxel_size: f32) -> ChunkVector {
+pub fn vec3_wv_to_cv(pos: Vec3, voxel_size: f32) -> ChunkVector {
     let world_voxel_pos = (pos / voxel_size).floor().as_ivec3();
     wv_to_cv(world_voxel_pos)
 }

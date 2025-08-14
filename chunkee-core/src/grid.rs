@@ -1,16 +1,15 @@
-use std::sync::Arc;
-
 use arc_swap::ArcSwap;
 use glam::IVec3;
 use parking_lot::RwLock;
 
 use crate::{
+    block::BLOCK_FACES,
     coords::ChunkVector,
     pipeline::{ChunkState, PhysicsState, WorldChunk},
 };
 
 pub struct ChunkPool {
-    pub flat: Vec<Arc<RwLock<WorldChunk>>>,
+    pub flat: Vec<RwLock<WorldChunk>>,
 }
 
 impl ChunkPool {
@@ -20,7 +19,7 @@ impl ChunkPool {
 
         Self {
             flat: (0..capacity)
-                .map(|_| Arc::new(RwLock::new(WorldChunk::default())))
+                .map(|_| RwLock::new(WorldChunk::default()))
                 .collect(),
         }
     }
@@ -66,7 +65,20 @@ impl GridView {
         dist_from_anchor > Self::TRIGGER_RADIUS
     }
 
-    pub fn compute_new(old_view: &GridView, camera_cv: ChunkVector) -> (Self, Vec<ChunkResetTask>) {
+    pub fn is_frontier(&self, cv: IVec3) -> bool {
+        for face in BLOCK_FACES {
+            let neighbor_cv = cv + face.into_normal();
+            if self.cv_to_idx_with_origin(neighbor_cv).is_none() {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn compute_new(
+        old_view: &GridView,
+        camera_cv: ChunkVector,
+    ) -> (Self, Vec<ChunkResetTask>, Vec<ChunkVector>) {
         let mut new_view = old_view.clone();
 
         if !new_view.initialized {
@@ -89,7 +101,7 @@ impl GridView {
                 })
                 .collect();
 
-            return (new_view, reset_tasks);
+            return (new_view, reset_tasks, Vec::new());
         }
 
         let direction = (camera_cv - new_view.grid_anchor).signum();
@@ -98,6 +110,7 @@ impl GridView {
 
         let mut new_indices = vec![FREE_GRID_IDX; old_view.indices.len()];
         let mut used_chunks = vec![false; old_view.indices.len()];
+        let mut remesh_cvs = Vec::new();
 
         for old_grid_idx in 0..old_view.indices.len() {
             let chunk_idx = old_view.indices[old_grid_idx];
@@ -105,11 +118,13 @@ impl GridView {
             let local_pos = Self::idx_to_local(old_grid_idx, old_view.dimensions);
             let cv = old_view.grid_origin + local_pos;
 
-            if let Some(new_grid_idx) =
-                Self::cv_to_idx_with_origin(cv, new_view.grid_origin, new_view.dimensions)
-            {
+            if let Some(new_grid_idx) = new_view.cv_to_idx_with_origin(cv) {
                 new_indices[new_grid_idx] = chunk_idx;
                 used_chunks[chunk_idx] = true;
+
+                if old_view.is_frontier(cv) && !new_view.is_frontier(cv) {
+                    remesh_cvs.push(cv);
+                }
             }
         }
 
@@ -133,11 +148,14 @@ impl GridView {
 
         new_view.indices = new_indices;
 
-        (new_view, reset_tasks)
+        (new_view, reset_tasks, remesh_cvs)
     }
 
-    pub fn cv_to_idx_with_origin(cv: IVec3, origin: IVec3, dims: IVec3) -> Option<usize> {
+    pub fn cv_to_idx_with_origin(&self, cv: IVec3) -> Option<usize> {
+        let origin = self.grid_origin;
+        let dims = self.dimensions;
         let local = cv - origin;
+
         if local.x >= 0
             && local.x < dims.x
             && local.y >= 0
@@ -226,29 +244,11 @@ impl ChunkManager {
         false
     }
 
-    fn get_lock(&self, cv: ChunkVector) -> Option<&Arc<RwLock<WorldChunk>>> {
+    fn get_lock(&self, cv: ChunkVector) -> Option<&RwLock<WorldChunk>> {
         let view = self.view.load();
-        let grid_idx = GridView::cv_to_idx_with_origin(cv, view.grid_origin, view.dimensions)?;
+        let grid_idx = view.cv_to_idx_with_origin(cv)?;
         let chunk_idx = *view.indices.get(grid_idx)?;
         self.pool.flat.get(chunk_idx)
-    }
-
-    pub fn get_state_matched(
-        &self,
-        cv: IVec3,
-        state: ChunkState,
-    ) -> Option<Arc<RwLock<WorldChunk>>> {
-        let view = self.view.load();
-        let grid_idx = GridView::cv_to_idx_with_origin(cv, view.grid_origin, view.dimensions)?;
-        let chunk_idx = *view.indices.get(grid_idx)?;
-        let chunk_arc = self.pool.flat.get(chunk_idx)?;
-        let world_chunk = chunk_arc.read();
-
-        if world_chunk.cv == cv && world_chunk.state == state {
-            Some(chunk_arc.clone())
-        } else {
-            None
-        }
     }
 }
 

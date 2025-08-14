@@ -14,14 +14,11 @@ use crate::{
     block::{BLOCK_FACES, ChunkeeVoxel, VoxelId},
     chunk::{CHUNK_SIDE_32, Chunk},
     coords::{
-        ChunkVector, LocalVector, NEIGHBOR_OFFSETS, camera_vec3_to_cv, cv_to_wv, wv_to_cv, wv_to_lv,
+        ChunkVector, LocalVector, NEIGHBOR_OFFSETS, cv_to_wv, vec3_wv_to_cv, wv_to_cv, wv_to_lv,
     },
     define_metrics,
     generation::VoxelGenerator,
-    grid::{
-        ChunkManager, GridView, check_chunk_p, check_chunk_pv, check_chunk_s, check_chunk_stable,
-        check_chunk_sv,
-    },
+    grid::{ChunkManager, GridView},
     hasher::{VoxelHashMap, VoxelHashSet},
     meshing::{ChunkMeshGroup, mesh_chunk, mesh_physics_chunk},
     metrics::Metrics,
@@ -167,7 +164,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
         });
 
         let worker_pool = WorkerPool::new::<V>(
-            12,
+            6,
             work_queues.clone(),
             chunk_manager.clone(),
             chunk_store.clone(),
@@ -199,7 +196,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                                 for offset in NEIGHBOR_OFFSETS {
                                     let scaled_offset = offset.as_vec3() * physics_radius;
                                     let neighbor_cv =
-                                        camera_vec3_to_cv(entity.pos + scaled_offset, voxel_size);
+                                        vec3_wv_to_cv(entity.pos + scaled_offset, voxel_size);
 
                                     current_physics_entities.insert(neighbor_cv);
                                 }
@@ -339,7 +336,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
             }
 
             let camera_data = camera_data.as_ref().unwrap();
-            let camera_cv = camera_vec3_to_cv(camera_data.pos, voxel_size);
+            let camera_cv = vec3_wv_to_cv(camera_data.pos, voxel_size);
 
             if camera_moved {
                 let mut dirty_chunks = Vec::new();
@@ -348,7 +345,8 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                 let current_view = chunk_manager.view.load();
                 if current_view.needs_update(camera_cv) {
                     let grid_update_time = Instant::now();
-                    let (new_view, reset_tasks) = GridView::compute_new(&current_view, camera_cv);
+                    let (new_view, reset_tasks, remesh_cvs) =
+                        GridView::compute_new(&current_view, camera_cv);
                     chunk_manager.view.store(Arc::new(new_view));
 
                     for (chunk_idx, new_cv) in reset_tasks {
@@ -375,6 +373,20 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                         worker_pool.sender.send(()).ok();
                     }
 
+                    for cv in remesh_cvs {
+                        chunk_manager.write(cv, |wc| {
+                            if wc.is_stable() {
+                                wc.state = ChunkState::Meshing;
+                                wc.version = wc.version.wrapping_add(1);
+                                work_queues.mesh.push(WorkerTask {
+                                    priority: compute_priority(cv, camera_data, voxel_size),
+                                    cv,
+                                });
+                                worker_pool.sender.send(()).ok();
+                            }
+                        });
+                    }
+
                     if !dirty_chunks.is_empty() {
                         batch_unload_deltas_task(dirty_chunks, &chunk_store, &thread_pool);
                     }
@@ -391,33 +403,30 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
 
                     work_queues.print_len();
                     thread::sleep(std::time::Duration::from_millis(5));
-                    continue;
-                }
+                } else {
+                    let loop_time = Instant::now();
+                    let view = chunk_manager.view.load();
+                    if !view.initialized {
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
 
-                let loop_time = Instant::now();
-                let view = chunk_manager.view.load();
-                if !view.initialized {
-                    thread::sleep(std::time::Duration::from_millis(5));
-                    continue;
-                }
+                    if !work_queues.is_empty() {
+                        work_queues.reprioritze_queues(camera_data, &view, voxel_size);
+                        worker_pool.sender.send(()).ok();
+                    }
 
+                    metrics
+                        .get_mut(PipelineMetrics::PipelineLoop)
+                        .record(loop_time.elapsed());
+                }
+            } else {
                 if !work_queues.is_empty() {
-                    work_queues.reprioritze_queues(camera_data, &view, voxel_size);
-
+                    work_queues.print_len();
                     worker_pool.sender.send(()).ok();
                 }
 
-                metrics
-                    .get_mut(PipelineMetrics::PipelineLoop)
-                    .record(loop_time.elapsed());
+                thread::sleep(Duration::from_millis(5));
             }
-
-            if !work_queues.is_empty() {
-                work_queues.print_len();
-                worker_pool.sender.send(()).ok();
-            }
-
-            thread::sleep(Duration::from_millis(5));
         }
     })
 }
@@ -478,8 +487,7 @@ impl WorkQueues {
     ) {
         let mut next_tasks = Vec::with_capacity(queue.len());
         while let Some(task) = queue.pop() {
-            if GridView::cv_to_idx_with_origin(task.cv, view.grid_origin, view.dimensions).is_some()
-            {
+            if view.cv_to_idx_with_origin(task.cv).is_some() {
                 next_tasks.push(WorkerTask {
                     cv: task.cv,
                     priority: compute_priority(task.cv, camera_data, voxel_size),

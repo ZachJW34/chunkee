@@ -1,6 +1,6 @@
 use glam::{IVec3, Vec3};
 
-use crate::coords::{CHUNK_SIZE, camera_vec3_to_cv, cv_to_wv};
+use crate::coords::{CHUNK_SIZE, vec3_wv_to_cv, cv_to_wv};
 
 // const LOD1_DIST: f32 = 8.0 * CHUNK_SIZE as f32;
 // const LOD2_DIST: f32 = 16.0 * CHUNK_SIZE as f32;
@@ -108,7 +108,7 @@ pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3, voxel_size: f32) -> f3
 }
 
 pub fn compute_priority(cv: IVec3, camera_data: &CameraData, voxel_size: f32) -> u32 {
-    let camera_cv = camera_vec3_to_cv(camera_data.pos, voxel_size);
+    let camera_cv = vec3_wv_to_cv(camera_data.pos, voxel_size);
     let delta = camera_cv - cv;
     if delta.x.abs() <= 2 && delta.y.abs() <= 2 && delta.z.abs() <= 2 {
         return 0;

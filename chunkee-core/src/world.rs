@@ -238,6 +238,14 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
             .send(PipelineMessage::PhysicsEntitiesUpdate(entities))
             .ok();
     }
+
+    pub fn chunk_in_range(&self, cv: ChunkVector) -> bool {
+        self.chunk_manager
+            .view
+            .load()
+            .cv_to_idx_with_origin(cv)
+            .is_some()
+    }
 }
 pub enum VoxelRaycast<V: ChunkeeVoxel> {
     Hit((WorldVector, V)),

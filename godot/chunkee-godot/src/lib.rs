@@ -43,7 +43,6 @@ pub struct ChunkeeWorldNode {
     voxel_raycast: VoxelRaycast<MyVoxels>,
     outline_node: Option<Gd<MeshInstance3D>>,
     metrics: Metrics<ChunkeeWorldNodeMetrics>,
-
     pub show_physics_debug_mesh: bool,
     #[export]
     pub opaque_material: Option<Gd<ShaderMaterial>>,
@@ -211,17 +210,18 @@ impl ChunkeeWorldNode {
 
         let drain_limit = 100;
 
-        for _ in 0..drain_limit {
-            let Some(cv) = self.voxel_world.results.mesh_unload.pop() else {
-                break;
-            };
-            if let Some(rids_to_free) = self.rendered_chunks.remove(&cv) {
-                for (instance_rid, mesh_rid) in rids_to_free {
-                    rs.free_rid(instance_rid);
-                    rs.free_rid(mesh_rid);
+        self.rendered_chunks.retain(|cv, rids| {
+            if !self.voxel_world.chunk_in_range(*cv) {
+                for (instance_rid, mesh_rid) in rids {
+                    rs.free_rid(*instance_rid);
+                    rs.free_rid(*mesh_rid);
                 }
+
+                return false;
             }
-        }
+
+            true
+        });
 
         if let (Some(opaque_material), Some(translucent_material)) =
             (&self.opaque_material, &self.translucent_material)

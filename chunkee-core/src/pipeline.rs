@@ -157,11 +157,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
         let mut previous_physics_entities = VoxelHashSet::default();
 
         // let total_tasks = calc_total_chunks(radius) as usize;
-        let work_queues = Arc::new(WorkQueues {
-            load: SegQueue::new(),
-            mesh: SegQueue::new(),
-            physics: SegQueue::new(),
-        });
+        let work_queues = Arc::new(WorkQueues::new());
 
         let worker_pool = WorkerPool::new::<V>(
             6,
@@ -233,6 +229,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                         }
                     }
                     PipelineMessage::ChunkEdits(edits) => {
+                        println!("Edit occured");
                         let mut voxel_edits: VoxelHashMap<Vec<(LocalVector, VoxelId)>> =
                             VoxelHashMap::default();
                         let mut neighbors_remesh = VoxelHashSet::default();
@@ -250,7 +247,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                             }
                         }
 
-                        let mut mesh_work_items = vec![];
+                        let mut edit_work_items = vec![];
                         let mut physics_work_items = vec![];
 
                         for (cv, edits) in voxel_edits.iter_mut() {
@@ -281,7 +278,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                                 wc.state = ChunkState::Meshing;
                                 wc.version = wc.version.wrapping_add(1);
 
-                                mesh_work_items.push(WorkerTask {
+                                edit_work_items.push(WorkerTask {
                                     priority: 0,
                                     cv: *cv,
                                 });
@@ -309,7 +306,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                                     wc.state = ChunkState::Meshing;
                                     wc.version = wc.version.wrapping_add(1);
 
-                                    mesh_work_items.push(WorkerTask {
+                                    edit_work_items.push(WorkerTask {
                                         priority: 0,
                                         cv: neighbor_cv,
                                     });
@@ -317,8 +314,8 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                             }
                         }
 
-                        for work_item in mesh_work_items {
-                            work_queues.mesh.push(work_item);
+                        for work_item in edit_work_items {
+                            work_queues.edit.push(work_item);
                             worker_pool.sender.send(()).ok();
                         }
 
@@ -458,19 +455,33 @@ struct WorkQueues {
     load: SegQueue<WorkerTask>,
     mesh: SegQueue<WorkerTask>,
     physics: SegQueue<WorkerTask>,
+    edit: SegQueue<WorkerTask>,
 }
 
 impl WorkQueues {
+    fn new() -> Self {
+        Self {
+            load: SegQueue::new(),
+            mesh: SegQueue::new(),
+            physics: SegQueue::new(),
+            edit: SegQueue::new(),
+        }
+    }
+
     fn is_empty(&self) -> bool {
-        self.load.is_empty() && self.mesh.is_empty() && self.physics.is_empty()
+        self.load.is_empty()
+            && self.mesh.is_empty()
+            && self.physics.is_empty()
+            && self.edit.is_empty()
     }
 
     fn print_len(&self) {
         println!(
-            "load={} | mesh={} | physics={}",
+            "load={} | mesh={} | physics={} | edit={}",
             self.load.len(),
             self.mesh.len(),
             self.physics.len(),
+            self.edit.len()
         )
     }
 
@@ -557,8 +568,8 @@ impl WorkerPool {
     ) {
         loop {
             while let Ok(_) = rx.recv() {
-                if let Some(work_item) = work_queues.physics.pop() {
-                    let cv = work_item.cv;
+                if let Some(task) = work_queues.physics.pop() {
+                    let cv = task.cv;
 
                     match physics_mesh_task::<V>(cv, &chunk_manager, voxel_size) {
                         TaskResult::Ok((version, mesh)) => {
@@ -574,14 +585,39 @@ impl WorkerPool {
                             });
                         }
                         TaskResult::NotReady => {
-                            work_queues.physics.push(work_item);
+                            work_queues.physics.push(task);
                         }
                         TaskResult::Invalid => {}
                     }
                 }
 
-                if let Some(work_item) = work_queues.mesh.pop() {
-                    let cv = work_item.cv;
+                if !work_queues.edit.is_empty() {
+                    if let Some(task) = work_queues.edit.pop() {
+                        let cv = task.cv;
+
+                        match edit_mesh_task::<V>(cv, &chunk_manager, voxel_size) {
+                            TaskResult::Ok((version, mesh)) => {
+                                chunk_manager.write(cv, |world_chunk| {
+                                    if world_chunk.state == ChunkState::Meshing
+                                        && world_chunk.version == version
+                                    {
+                                        world_chunk.state = ChunkState::MeshReady;
+
+                                        results.mesh_load.push((cv, mesh));
+                                        sx.send(()).ok();
+                                    }
+                                });
+                            }
+                            TaskResult::NotReady => {
+                                work_queues.edit.push(task);
+                            }
+                            TaskResult::Invalid => {}
+                        }
+                    }
+                }
+
+                if let Some(task) = work_queues.mesh.pop() {
+                    let cv = task.cv;
 
                     match mesh_task::<V>(cv, &chunk_manager, voxel_size) {
                         TaskResult::Ok((version, mesh)) => {
@@ -597,14 +633,14 @@ impl WorkerPool {
                             });
                         }
                         TaskResult::NotReady => {
-                            work_queues.mesh.push(work_item);
+                            work_queues.mesh.push(task);
                         }
                         TaskResult::Invalid => {}
                     }
                 }
 
-                if let Some(work_item) = work_queues.load.pop() {
-                    let cv = work_item.cv;
+                if let Some(task) = work_queues.load.pop() {
+                    let cv = task.cv;
 
                     match load_task::<V>(cv, &chunk_manager, &chunk_store, &generator, voxel_size) {
                         TaskResult::Ok((mut chunk, deltas, uniform_voxel_id)) => {
@@ -616,7 +652,7 @@ impl WorkerPool {
                                     world_chunk.uniform_voxel_id = uniform_voxel_id;
                                     world_chunk.state = ChunkState::Meshing;
 
-                                    work_queues.mesh.push(work_item);
+                                    work_queues.mesh.push(task);
                                     sx.send(()).ok();
                                 }
                             });
@@ -626,7 +662,6 @@ impl WorkerPool {
                 }
 
                 if !work_queues.is_empty() {
-                    // work_queues.print_len();
                     sx.send(()).ok();
                 }
             }
@@ -679,6 +714,39 @@ fn load_task<V: ChunkeeVoxel>(
 }
 
 fn mesh_task<V: ChunkeeVoxel>(
+    cv: ChunkVector,
+    chunk_manager: &ChunkManager,
+    voxel_size: f32,
+) -> TaskResult<(ChunkVersion, ChunkMeshGroup)> {
+    if !chunk_manager.check(cv, |wc| wc.state == ChunkState::Meshing) {
+        return TaskResult::Invalid;
+    }
+
+    let mut neighbors = Box::new([None; 6]);
+
+    for (idx, neighbor_cv) in neighbors_of(cv).into_iter().enumerate() {
+        match chunk_manager.read(neighbor_cv, |wc| wc.is_stable().then_some(wc.chunk.clone())) {
+            Some(Some(chunk)) => neighbors[idx] = Some(chunk),
+            Some(None) => return TaskResult::NotReady,
+            None => {}
+        }
+    }
+
+    let neighbors = Box::new(neighbors.map(|mut chunk| chunk.take().unwrap_or(Chunk::new())));
+
+    let Some((center, version)) =
+        chunk_manager.read(cv, |wc| (Box::new(wc.chunk.clone()), wc.version))
+    else {
+        return TaskResult::Invalid;
+    };
+
+    let mesh = mesh_chunk::<V>(cv, center, neighbors, voxel_size);
+
+    TaskResult::Ok((version, mesh))
+}
+
+// Compiler bug, using the mesh_task above causes the app to crash...
+fn edit_mesh_task<V: ChunkeeVoxel>(
     cv: ChunkVector,
     chunk_manager: &ChunkManager,
     voxel_size: f32,

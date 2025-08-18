@@ -27,13 +27,13 @@ void fragment() {
     vec3 albedo_rgb = texture(texture_array, vec3(uv, albedo_layer)).rgb;
 
     float normal_layer = albedo_layer + float(atlas_columns);
-	  vec3 normal_map_rgb = texture(texture_array, vec3(uv, normal_layer)).rgb;
+    vec3 normal_map_rgb = texture(texture_array, vec3(uv, normal_layer)).rgb;
 
     float aord_layer = albedo_layer + float(2 * atlas_columns);
-	  vec3 aord_rgb = texture(texture_array, vec3(uv, aord_layer)).rgb;
+    vec3 aord_rgb = texture(texture_array, vec3(uv, aord_layer)).rgb;
 
- 	  ALBEDO = srgb_to_linear(albedo_rgb);
-	  ALBEDO *= mix(1.0, pow(aord_rgb.r, 2.0), ao_intensity);
+    ALBEDO = srgb_to_linear(albedo_rgb);
+    ALBEDO *= mix(1.0, pow(aord_rgb.r, 2.0), ao_intensity);
     NORMAL = apply_normal_map(TANGENT, BINORMAL, NORMAL, normal_map_rgb);
-	  ROUGHNESS = aord_rgb.g;
+    ROUGHNESS = aord_rgb.g;
 }

@@ -1,17 +1,16 @@
 use std::marker::PhantomData;
 
 use block_mesh::{
-    greedy_quads,
+    GreedyQuadsBuffer, MergeVoxel, OrientedBlockFace, RIGHT_HANDED_Y_UP_CONFIG, UnorientedQuad,
+    Voxel, VoxelVisibility, greedy_quads,
     ndshape::{ConstShape, ConstShape3u32},
-    GreedyQuadsBuffer, MergeVoxel, OrientedBlockFace, UnorientedQuad, Voxel, VoxelVisibility,
-    RIGHT_HANDED_Y_UP_CONFIG,
 };
 use glam::{IVec3, Vec3};
 
 use crate::{
-    block::{BlockFace, ChunkeeVoxel, Rotation, VoxelCollision, VoxelId, BLOCK_FACES},
-    chunk::{Chunk, CHUNK_SIDE_32},
-    coords::{cv_to_wv, ChunkVector},
+    block::{BLOCK_FACES, BlockFace, ChunkeeVoxel, Rotation, VoxelCollision, VoxelId},
+    chunk::{CHUNK_SIDE_32, Chunk},
+    coords::{ChunkVector, cv_to_wv},
 };
 
 type Shape34 = ConstShape3u32<34, 34, 34>;
@@ -266,15 +265,7 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
                 &mut translucent
             };
 
-            process_quad(
-                mesh,
-                quad,
-                face,
-                chunk_offset,
-                voxel,
-                rotation,
-                voxel_size,
-            );
+            process_quad(mesh, quad, face, chunk_offset, voxel, rotation, voxel_size);
         }
     }
 
@@ -459,3 +450,79 @@ pub fn mesh_physics_chunk<V: ChunkeeVoxel>(
 
     triangles
 }
+
+// pub struct FaceAABB {
+//     pub center: Vec3,
+//     pub half_extents: Vec3,
+// }
+
+// pub fn mesh_physics_chunk_box<V: ChunkeeVoxel>(
+//     cv: ChunkVector,
+//     chunk: Box<Chunk>,
+//     voxel_size: f32,
+// ) -> Vec<FaceAABB> {
+//     let padded_side = CHUNK_SIDE_32 + 2;
+//     let padded_volume = padded_side * padded_side * padded_side;
+//     let mut padded_voxels = vec![VoxelId::AIR; padded_volume as usize];
+//     let pos_to_idx =
+//         |p: IVec3| (p.x + p.y * padded_side + p.z * padded_side * padded_side) as usize;
+
+//     for z in 0..CHUNK_SIDE_32 {
+//         for y in 0..CHUNK_SIDE_32 {
+//             for x in 0..CHUNK_SIDE_32 {
+//                 let local_pos = IVec3::new(x, y, z);
+//                 let padded_pos = local_pos + 1;
+//                 padded_voxels[pos_to_idx(padded_pos)] = chunk.get_voxel(local_pos);
+//             }
+//         }
+//     }
+
+//     let mesher_voxels: &[PhysicsMesherVoxel<V>] = unsafe {
+//         std::slice::from_raw_parts(
+//             padded_voxels.as_ptr() as *const PhysicsMesherVoxel<V>,
+//             padded_voxels.len(),
+//         )
+//     };
+
+//     let mut buffer = GreedyQuadsBuffer::new(padded_voxels.len());
+//     greedy_quads(
+//         mesher_voxels,
+//         &Shape34 {},
+//         [0; 3],
+//         [33; 3],
+//         &RIGHT_HANDED_Y_UP_CONFIG.faces,
+//         &mut buffer,
+//     );
+
+//     let chunk_offset = cv_to_wv(cv).as_vec3() * voxel_size;
+//     let mut faces = Vec::with_capacity(buffer.quads.num_quads() * 2 * 3);
+
+//     for (face, quads) in RIGHT_HANDED_Y_UP_CONFIG
+//         .faces
+//         .iter()
+//         .zip(buffer.quads.groups.into_iter())
+//     {
+//         for quad in quads.into_iter() {
+//             let positions = face
+//                 .quad_mesh_positions(&quad.into(), voxel_size)
+//                 .map(|pos| (Vec3::from_array(pos) - Vec3::splat(voxel_size) + chunk_offset));
+
+//             let mut min = positions[0];
+//             let mut max = positions[0];
+//             for p in &positions[1..] {
+//                 min = min.min(*p);
+//                 max = max.max(*p);
+//             }
+
+//             let half_extents = (max - min) * 0.5;
+//             let center = (max + min) * 0.5;
+
+//             faces.push(FaceAABB {
+//                 center,
+//                 half_extents,
+//             });
+//         }
+//     }
+
+//     faces
+// }

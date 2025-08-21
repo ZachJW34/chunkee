@@ -40,3 +40,14 @@ magick \
  \( snow/albedo.jpg snow/normal.jpg snow/aord-packed.jpg -append \) \
  +append \
  texture_array.png
+
+### LabPBR
+
+magick \
+ \( grass_block_top.png grass_block_top_n.png grass_block_top_s.png -append \) \
+ \( grass_block_side.png grass_block_side_n.png grass_block_side_s.png -append \) \
+ \( dirt.png dirt_n.png dirt_s.png -append \) \
+ \( stone.png stone_n.png stone_s.png -append \) \
+ \( snow.png snow_n.png snow_s.png -append \) \
+ +append \
+ texture_array.png

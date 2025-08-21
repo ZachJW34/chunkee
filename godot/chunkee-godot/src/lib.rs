@@ -38,6 +38,7 @@ pub struct ChunkeeWorldNode {
     voxel_world: ChunkeeWorld<MyVoxels>,
     rendered_chunks: VoxelHashMap<Vec<(Rid, Rid)>>,
     physics_chunks: VoxelHashMap<Gd<CollisionShape3D>>,
+    // physics_chunks_box: VoxelHashMap<Gd<StaticBody3D>>,
     physics_debug_meshes: VoxelHashMap<Gd<MeshInstance3D>>,
     world_scenario: Rid,
     voxel_raycast: VoxelRaycast<MyVoxels>,
@@ -71,6 +72,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
             world_scenario: Rid::Invalid,
             rendered_chunks: Default::default(),
             physics_chunks: Default::default(),
+            // physics_chunks_box: Default::default(),
             physics_debug_meshes: Default::default(),
             opaque_material: None,
             translucent_material: None,
@@ -142,6 +144,27 @@ impl IStaticBody3D for ChunkeeWorldNode {
                 self.voxel_world.set_voxels_at(&sphere_removals);
             }
 
+            if input.is_action_just_pressed("add_block")
+                && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
+            {
+                let radius = 10;
+                let radius_sq = radius * radius;
+                let mut sphere_removals = vec![];
+
+                for x in -radius..=radius {
+                    for y in -radius..=radius {
+                        for z in -radius..=radius {
+                            let offset = IVec3::new(x, y, z);
+                            if offset.length_squared() <= radius_sq {
+                                let wv = hit.0 + offset;
+                                sphere_removals.push((wv, MyVoxels::Stone));
+                            }
+                        }
+                    }
+                }
+                self.voxel_world.set_voxels_at(&sphere_removals);
+            }
+
             self.render();
 
             self.metrics
@@ -165,6 +188,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
 
             self.voxel_world.update_physics_entities(entities);
             self.process_physics_meshes();
+            // self.process_physics_meshes_box();
         }
     }
     fn exit_tree(&mut self) {
@@ -323,6 +347,52 @@ impl ChunkeeWorldNode {
             }
         }
     }
+
+    // fn process_physics_meshes_box(&mut self) {
+    //     if let Some((cv, faces)) = self.voxel_world.results.physics_load_box.pop() {
+    //         if faces.is_empty() {
+    //             if let Some(mut old_debug_mesh) = self.physics_debug_meshes.remove(&cv) {
+    //                 old_debug_mesh.queue_free();
+    //             }
+
+    //             if let Some(mut old_col) = self.physics_chunks_box.remove(&cv) {
+    //                 old_col.queue_free();
+    //             }
+    //         } else {
+    //             // --- Debug Visualization Mesh ---
+    //             let mut debug_mesh_instance = create_physics_debug_mesh_box(&faces);
+    //             debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
+    //             self.base_mut().add_child(&debug_mesh_instance);
+    //             if let Some(mut old_debug_mesh) =
+    //                 self.physics_debug_meshes.insert(cv, debug_mesh_instance)
+    //             {
+    //                 old_debug_mesh.queue_free();
+    //             }
+    //             // ---------------------------------------
+
+    //             let collision_nodes = create_physics_boxes(faces);
+    //             let mut parent = StaticBody3D::new_alloc();
+    //             for node in collision_nodes {
+    //                 parent.add_child(&node);
+    //             }
+    //             self.base_mut().add_child(&parent);
+
+    //             if let Some(mut old_col) = self.physics_chunks_box.insert(cv, parent) {
+    //                 old_col.queue_free();
+    //             }
+    //         }
+    //     }
+
+    //     if let Some(cv) = self.voxel_world.results.physics_unload.pop() {
+    //         if let Some(mut shape_to_remove) = self.physics_chunks_box.remove(&cv) {
+    //             shape_to_remove.queue_free();
+    //         }
+
+    //         if let Some(mut debug_mesh_to_remove) = self.physics_debug_meshes.remove(&cv) {
+    //             debug_mesh_to_remove.queue_free();
+    //         }
+    //     }
+    // }
 }
 
 fn create_render_instance(
@@ -444,6 +514,7 @@ fn create_physics_mesh(triangles: Vec<Vec3>) -> Gd<CollisionShape3D> {
             .into_iter()
             .map(|tri| Vector3::from_array(tri.to_array())),
     );
+
     let mut shape_resource = ConcavePolygonShape3D::new_gd();
     shape_resource.set_faces(&faces);
     shape_resource.set_backface_collision_enabled(true);
@@ -452,6 +523,23 @@ fn create_physics_mesh(triangles: Vec<Vec3>) -> Gd<CollisionShape3D> {
 
     shape_node
 }
+
+// fn create_physics_boxes(faces: Vec<FaceAABB>) -> Vec<Gd<CollisionShape3D>> {
+//     let mut boxes = vec![];
+
+//     for face in &faces {
+//         let mut new_box = BoxShape3D::new_gd();
+//         new_box.set_size(Vector3::from_array((face.half_extents * 2.0).to_array()));
+
+//         let mut shape_node = CollisionShape3D::new_alloc();
+//         shape_node.set_shape(&new_box);
+//         shape_node.set_position(Vector3::from_array(face.center.to_array()));
+
+//         boxes.push(shape_node);
+//     }
+
+//     boxes
+// }
 
 fn create_physics_debug_mesh(triangles: Vec<Vec3>) -> Gd<MeshInstance3D> {
     let mut st = SurfaceTool::new_gd();
@@ -485,3 +573,70 @@ fn create_physics_debug_mesh(triangles: Vec<Vec3>) -> Gd<MeshInstance3D> {
     mesh_instance.set_mesh(&mesh);
     mesh_instance
 }
+
+// fn create_physics_debug_mesh_box(faces: &Vec<FaceAABB>) -> Gd<MeshInstance3D> {
+//     let mut st = SurfaceTool::new_gd();
+
+//     st.begin(MeshPrimitiveType::LINES);
+
+//     for face in faces {
+//         let center = Vector3::from_array(face.center.to_array());
+//         let half_extents = Vector3::from_array(face.half_extents.to_array());
+
+//         let min = center - half_extents;
+//         let max = center + half_extents;
+
+//         let v = [
+//             Vector3::new(min.x, min.y, min.z), // 0
+//             Vector3::new(max.x, min.y, min.z), // 1
+//             Vector3::new(max.x, max.y, min.z), // 2
+//             Vector3::new(min.x, max.y, min.z), // 3
+//             Vector3::new(min.x, min.y, max.z), // 4
+//             Vector3::new(max.x, min.y, max.z), // 5
+//             Vector3::new(max.x, max.y, max.z), // 6
+//             Vector3::new(min.x, max.y, max.z), // 7
+//         ];
+
+//         // Bottom face
+//         st.add_vertex(v[0]);
+//         st.add_vertex(v[1]);
+//         st.add_vertex(v[1]);
+//         st.add_vertex(v[5]);
+//         st.add_vertex(v[5]);
+//         st.add_vertex(v[4]);
+//         st.add_vertex(v[4]);
+//         st.add_vertex(v[0]);
+
+//         // Top face
+//         st.add_vertex(v[3]);
+//         st.add_vertex(v[2]);
+//         st.add_vertex(v[2]);
+//         st.add_vertex(v[6]);
+//         st.add_vertex(v[6]);
+//         st.add_vertex(v[7]);
+//         st.add_vertex(v[7]);
+//         st.add_vertex(v[3]);
+
+//         // Vertical connecting edges
+//         st.add_vertex(v[0]);
+//         st.add_vertex(v[3]);
+//         st.add_vertex(v[1]);
+//         st.add_vertex(v[2]);
+//         st.add_vertex(v[4]);
+//         st.add_vertex(v[7]);
+//         st.add_vertex(v[5]);
+//         st.add_vertex(v[6]);
+//     }
+
+//     let mut mesh = st.commit().unwrap();
+
+//     let mut material = StandardMaterial3D::new_gd();
+//     material.set_shading_mode(ShadingMode::UNSHADED);
+//     material.set_albedo(Color::from_rgb(0.0, 1.0, 0.0)); //Bright Green
+
+//     mesh.surface_set_material(0, &material);
+
+//     let mut mesh_instance = MeshInstance3D::new_alloc();
+//     mesh_instance.set_mesh(&mesh);
+//     mesh_instance
+// }

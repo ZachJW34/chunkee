@@ -9,6 +9,7 @@
 [ext_resource type="Shader" uid="uid://u2fw4wx7ntjk" path="res://shaders/voxel_transparent.gdshader" id="6_272bh"]
 
 [sub_resource type="PhysicalSkyMaterial" id="PhysicalSkyMaterial_7mycd"]
+energy_multiplier = 2.0
 use_debanding = false
 
 [sub_resource type="Sky" id="Sky_272bh"]
@@ -18,14 +19,18 @@ sky_material = SubResource("PhysicalSkyMaterial_7mycd")
 background_mode = 2
 sky = SubResource("Sky_272bh")
 ambient_light_source = 3
-ambient_light_color = Color(0.976403, 0.976403, 0.976403, 1)
+ambient_light_color = Color(1, 1, 1, 1)
 reflected_light_source = 2
 tonemap_mode = 3
 tonemap_white = 6.0
 ssao_enabled = true
 sdfgi_enabled = true
+sdfgi_bounce_feedback = 1.0
 
 [sub_resource type="CameraAttributesPractical" id="CameraAttributesPractical_kek77"]
+auto_exposure_speed = 8.4
+auto_exposure_min_sensitivity = 118.5
+auto_exposure_max_sensitivity = 13436.0
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_5vw27"]
 render_priority = 0
@@ -64,12 +69,17 @@ albedo_color = Color(1, 0, 0, 1)
 environment = SubResource("Environment_5vw27")
 camera_attributes = SubResource("CameraAttributesPractical_kek77")
 script = ExtResource("1_h2yge")
-current_time = 14.6619
+current_time = 10.5307
 minutes_per_day = 1217.8
+reflected_energy = 2.0
+auto_exposure_scale = 0.4
+auto_exposure_min = 118.5
+auto_exposure_max = 13436.0
+auto_exposure_speed = 8.4
 metadata/_custom_type_script = "uid://cdk4h6kxxjfqt"
 
 [node name="SunLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.794042, -0.607863, 0.68779, -0.441253, 0.576403, -0.725909, -0.418082, 0.546134, -0.607863, 0.576403, 0.546135)
+transform = Transform3D(0, -0.941876, 0.33596, 0.628025, 0.261442, 0.732962, -0.778193, 0.210991, 0.591522, 0.33596, 0.732962, 0.591522)
 shadow_enabled = true
 
 [node name="MoonLight" type="DirectionalLight3D" parent="Sky3D"]
@@ -89,8 +99,8 @@ ground_color = Color(0.3, 0.3, 0.3, 1)
 sky_layers = 4
 sky_render_priority = -128
 horizon_level = 0.0
-sun_altitude = -54.8021
-sun_azimuth = -228.062
+sun_altitude = -42.8647
+sun_azimuth = -150.405
 sun_disk_color = Color(0.996094, 0.541334, 0.140076, 1)
 sun_disk_intensity = 2.0
 sun_disk_size = 0.015
@@ -98,8 +108,8 @@ sun_light_path = NodePath("../SunLight")
 sun_light_color = Color(1, 1, 1, 1)
 sun_horizon_light_color = Color(0.98, 0.523, 0.294, 1)
 sun_light_energy = 1.0
-moon_altitude = -130.411
-moon_azimuth = -265.276
+moon_altitude = -74.9246
+moon_azimuth = -252.414
 moon_color = Color(1, 1, 1, 1)
 moon_size = 0.07
 enable_set_moon_texture = false
@@ -107,7 +117,7 @@ moon_resolution = 2
 moon_light_path = NodePath("../MoonLight")
 moon_light_color = Color(0.572549, 0.776471, 0.956863, 1)
 moon_light_energy = 0.3
-deep_space_euler = Vector3(1.29154, -3.14159, 0.425516)
+deep_space_euler = Vector3(1.29154, 3.14159, 1.51002)
 background_color = Color(0.709804, 0.709804, 0.709804, 0.854902)
 set_background_texture = false
 stars_field_color = Color(1, 1, 1, 1)
@@ -174,7 +184,7 @@ script = ExtResource("3_lquwl")
 dome_path = NodePath("../Skydome")
 system_sync = false
 total_cycle_in_minutes = 1217.8
-total_hours = 14.6619
+total_hours = 10.5307
 day = 14
 month = 1
 year = 2025

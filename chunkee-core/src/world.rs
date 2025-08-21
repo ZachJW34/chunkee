@@ -30,6 +30,7 @@ pub struct ResultQueues {
     pub mesh_load: SegQueue<(ChunkVector, ChunkMeshGroup)>,
     pub mesh_unload: SegQueue<ChunkVector>,
     pub physics_load: SegQueue<(ChunkVector, Vec<Vec3>)>,
+    // pub physics_load_box: SegQueue<(ChunkVector, Vec<FaceAABB>)>,
     pub physics_unload: SegQueue<ChunkVector>,
     pub edits: SegQueue<(WorldVector, VoxelId)>,
 }
@@ -61,6 +62,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
             mesh_load: SegQueue::new(),
             mesh_unload: SegQueue::new(),
             physics_load: SegQueue::new(),
+            // physics_load_box: SegQueue::new(),
             physics_unload: SegQueue::new(),
             edits: SegQueue::new(),
         });
@@ -119,26 +121,6 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
                 .send(PipelineMessage::CameraDataUpdate(camera_data))
                 .ok();
         }
-
-        // for result in pipeline.receiver.try_iter() {
-        //     match result {
-        //         PipelineResult::MeshReady { cv, mesh } => self.mesh_queue.push((cv, mesh)),
-        //         PipelineResult::PhysicsMeshReady { cv, mesh } => {
-        //             self.physics_mesh_queue.push((cv, mesh))
-        //         }
-        //         PipelineResult::PhysicsMeshUnload { cvs } => {
-        //             for cv in cvs {
-        //                 self.physics_mesh_unload_queue.push(cv);
-        //             }
-        //         }
-        //         PipelineResult::EditsApplied(edits) => {
-        //             for edit in edits {
-        //                 self.edits_applied_queue.push(edit);
-        //             }
-        //         }
-        //         PipelineResult::ChunkUnloaded { cv: _cv } => {}
-        //     }
-        // }
     }
 
     pub fn set_voxels_at(&self, changes: &[(WorldVector, V)]) {

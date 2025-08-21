@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam::queue::SegQueue;
+use crossbeam::queue::{ArrayQueue, SegQueue};
 use crossbeam_channel::{Receiver, Sender};
 use glam::{IVec3, Vec3};
 
@@ -23,7 +23,7 @@ use crate::{
     meshing::{ChunkMeshGroup, mesh_chunk, mesh_physics_chunk},
     metrics::Metrics,
     storage::{ChunkStore, PersistedChunk},
-    streaming::{CameraData, compute_priority},
+    streaming::{CameraData, calc_total_chunks, compute_priority},
     world::ResultQueues,
 };
 
@@ -156,8 +156,8 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
         let thread_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
         let mut previous_physics_entities = VoxelHashSet::default();
 
-        // let total_tasks = calc_total_chunks(radius) as usize;
-        let work_queues = Arc::new(WorkQueues::new());
+        let total_tasks = calc_total_chunks(radius) as usize;
+        let work_queues = Arc::new(WorkQueues::new(total_tasks));
 
         let worker_pool = WorkerPool::new::<V>(
             6,
@@ -375,10 +375,13 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
                             if wc.is_stable() {
                                 wc.state = ChunkState::Meshing;
                                 wc.version = wc.version.wrapping_add(1);
-                                work_queues.mesh.push(WorkerTask {
-                                    priority: compute_priority(cv, camera_data, voxel_size),
-                                    cv,
-                                });
+                                work_queues
+                                    .mesh
+                                    .push(WorkerTask {
+                                        priority: compute_priority(cv, camera_data, voxel_size),
+                                        cv,
+                                    })
+                                    .ok();
                                 worker_pool.sender.send(()).ok();
                             }
                         });
@@ -390,7 +393,7 @@ pub fn spawn_pipeline_thread<V: 'static + ChunkeeVoxel>(
 
                     new_load_tasks.sort();
                     for item in new_load_tasks {
-                        work_queues.load.push(item);
+                        work_queues.load.push(item).ok();
                     }
                     worker_pool.sender.send(()).ok();
 
@@ -452,17 +455,17 @@ impl Ord for WorkerTask {
 }
 
 struct WorkQueues {
-    load: SegQueue<WorkerTask>,
-    mesh: SegQueue<WorkerTask>,
+    load: ArrayQueue<WorkerTask>,
+    mesh: ArrayQueue<WorkerTask>,
     physics: SegQueue<WorkerTask>,
     edit: SegQueue<WorkerTask>,
 }
 
 impl WorkQueues {
-    fn new() -> Self {
+    fn new(cap: usize) -> Self {
         Self {
-            load: SegQueue::new(),
-            mesh: SegQueue::new(),
+            load: ArrayQueue::new(cap),
+            mesh: ArrayQueue::new(cap),
             physics: SegQueue::new(),
             edit: SegQueue::new(),
         }
@@ -491,7 +494,7 @@ impl WorkQueues {
     }
 
     fn repriotize_queue(
-        queue: &SegQueue<WorkerTask>,
+        queue: &ArrayQueue<WorkerTask>,
         camera_data: &CameraData,
         view: &GridView,
         voxel_size: f32,
@@ -507,7 +510,7 @@ impl WorkQueues {
         }
         next_tasks.sort();
         for task in next_tasks {
-            queue.push(task);
+            queue.push(task).ok();
         }
     }
 }
@@ -589,6 +592,25 @@ impl WorkerPool {
                         }
                         TaskResult::Invalid => {}
                     }
+
+                    // match physics_mesh_task_box::<V>(cv, &chunk_manager, voxel_size) {
+                    //     TaskResult::Ok((version, faces)) => {
+                    //         chunk_manager.write(cv, |world_chunk| {
+                    //             if world_chunk.physics_state == PhysicsState::Meshing
+                    //                 && world_chunk.version == version
+                    //             {
+                    //                 world_chunk.physics_state = PhysicsState::MeshReady;
+
+                    //                 results.physics_load_box.push((cv, faces));
+                    //                 sx.send(()).ok();
+                    //             }
+                    //         });
+                    //     }
+                    //     TaskResult::NotReady => {
+                    //         work_queues.physics.push(task);
+                    //     }
+                    //     TaskResult::Invalid => {}
+                    // }
                 }
 
                 if !work_queues.edit.is_empty() {
@@ -633,7 +655,7 @@ impl WorkerPool {
                             });
                         }
                         TaskResult::NotReady => {
-                            work_queues.mesh.push(task);
+                            work_queues.mesh.push(task).ok();
                         }
                         TaskResult::Invalid => {}
                     }
@@ -652,7 +674,7 @@ impl WorkerPool {
                                     world_chunk.uniform_voxel_id = uniform_voxel_id;
                                     world_chunk.state = ChunkState::Meshing;
 
-                                    work_queues.mesh.push(task);
+                                    work_queues.mesh.push(task).ok();
                                     sx.send(()).ok();
                                 }
                             });
@@ -800,6 +822,29 @@ fn physics_mesh_task<V: ChunkeeVoxel>(
 
     TaskResult::Ok((version, mesh))
 }
+
+// fn physics_mesh_task_box<V: ChunkeeVoxel>(
+//     cv: ChunkVector,
+//     chunk_manager: &ChunkManager,
+//     voxel_size: f32,
+// ) -> TaskResult<(ChunkVersion, Vec<FaceAABB>)> {
+//     let (chunk, version) = match chunk_manager.read(cv, |wc| {
+//         wc.is_stable()
+//             .then_some((Box::new(wc.chunk.clone()), wc.version))
+//     }) {
+//         Some(Some(res)) => res,
+//         Some(None) => {
+//             return TaskResult::NotReady;
+//         }
+//         None => {
+//             return TaskResult::Invalid;
+//         }
+//     };
+
+//     let mesh = mesh_physics_chunk_box::<V>(cv, chunk, voxel_size);
+
+//     TaskResult::Ok((version, mesh))
+// }
 
 pub fn merge_deltas<V: ChunkeeVoxel>(chunk: &mut Chunk, deltas: &Deltas) {
     for (lv, voxel_id) in deltas.0.iter() {

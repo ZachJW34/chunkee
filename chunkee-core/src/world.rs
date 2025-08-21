@@ -30,7 +30,6 @@ pub struct ResultQueues {
     pub mesh_load: SegQueue<(ChunkVector, ChunkMeshGroup)>,
     pub mesh_unload: SegQueue<ChunkVector>,
     pub physics_load: SegQueue<(ChunkVector, Vec<Vec3>)>,
-    // pub physics_load_box: SegQueue<(ChunkVector, Vec<FaceAABB>)>,
     pub physics_unload: SegQueue<ChunkVector>,
     pub edits: SegQueue<(WorldVector, VoxelId)>,
 }
@@ -62,7 +61,6 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
             mesh_load: SegQueue::new(),
             mesh_unload: SegQueue::new(),
             physics_load: SegQueue::new(),
-            // physics_load_box: SegQueue::new(),
             physics_unload: SegQueue::new(),
             edits: SegQueue::new(),
         });
@@ -95,7 +93,6 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
             self.pipeline = Some(Pipeline {
                 handle: pipeline_handle,
                 sender: pipeline_sender,
-                // receiver: mesh_receiver,
             })
         }
     }
@@ -182,32 +179,6 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         VoxelRaycast::Miss
     }
 
-    // pub fn get_voxels_for_aabb(&self, aabb: AABB, padding: i32) -> Vec<(WorldVector, VoxelId)> {
-    //     let padded_min = aabb.min - padding;
-    //     let padded_max = aabb.max + padding;
-    //     let mut voxels = vec![];
-    //     let grid_lock = self.grid.read();
-
-    //     for x in padded_min.x..padded_max.x {
-    //         for y in padded_min.y..padded_max.y {
-    //             for z in padded_min.z..padded_max.z {
-    //                 let wv = IVec3::new(x, y, z);
-    //                 let cv = wv_to_cv(wv);
-    //                 let lv = wv_to_lv(wv);
-    //                 if let Some(world_chunk) = grid_lock.get(cv)
-    //                     && world_chunk.is_stable()
-    //                 {
-    //                     voxels.push((wv, world_chunk.chunk.get_voxel(lv)));
-    //                 } else {
-    //                     voxels.push((wv, VoxelId::AIR));
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     voxels
-    // }
-
     pub fn update_physics_entities(&self, entities: Vec<PhysicsEntity>) {
         let pipeline = if let Some(pipeline) = self.pipeline.as_ref() {
             pipeline
@@ -238,5 +209,4 @@ pub enum VoxelRaycast<V: ChunkeeVoxel> {
 struct Pipeline {
     pub handle: JoinHandle<()>,
     pub sender: Sender<PipelineMessage>,
-    // pub receiver: Receiver<PipelineResult>,
 }

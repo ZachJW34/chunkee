@@ -592,25 +592,6 @@ impl WorkerPool {
                         }
                         TaskResult::Invalid => {}
                     }
-
-                    // match physics_mesh_task_box::<V>(cv, &chunk_manager, voxel_size) {
-                    //     TaskResult::Ok((version, faces)) => {
-                    //         chunk_manager.write(cv, |world_chunk| {
-                    //             if world_chunk.physics_state == PhysicsState::Meshing
-                    //                 && world_chunk.version == version
-                    //             {
-                    //                 world_chunk.physics_state = PhysicsState::MeshReady;
-
-                    //                 results.physics_load_box.push((cv, faces));
-                    //                 sx.send(()).ok();
-                    //             }
-                    //         });
-                    //     }
-                    //     TaskResult::NotReady => {
-                    //         work_queues.physics.push(task);
-                    //     }
-                    //     TaskResult::Invalid => {}
-                    // }
                 }
 
                 if !work_queues.edit.is_empty() {
@@ -822,29 +803,6 @@ fn physics_mesh_task<V: ChunkeeVoxel>(
 
     TaskResult::Ok((version, mesh))
 }
-
-// fn physics_mesh_task_box<V: ChunkeeVoxel>(
-//     cv: ChunkVector,
-//     chunk_manager: &ChunkManager,
-//     voxel_size: f32,
-// ) -> TaskResult<(ChunkVersion, Vec<FaceAABB>)> {
-//     let (chunk, version) = match chunk_manager.read(cv, |wc| {
-//         wc.is_stable()
-//             .then_some((Box::new(wc.chunk.clone()), wc.version))
-//     }) {
-//         Some(Some(res)) => res,
-//         Some(None) => {
-//             return TaskResult::NotReady;
-//         }
-//         None => {
-//             return TaskResult::Invalid;
-//         }
-//     };
-
-//     let mesh = mesh_physics_chunk_box::<V>(cv, chunk, voxel_size);
-
-//     TaskResult::Ok((version, mesh))
-// }
 
 pub fn merge_deltas<V: ChunkeeVoxel>(chunk: &mut Chunk, deltas: &Deltas) {
     for (lv, voxel_id) in deltas.0.iter() {

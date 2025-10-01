@@ -269,9 +269,10 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
         }
     }
 
-    optimize_mesh(&mut opaque);
+    // Do testing to see if this is needed
+    // optimize_mesh(&mut opaque);
     generate_tangents(&mut opaque);
-    optimize_mesh(&mut translucent);
+    // optimize_mesh(&mut translucent);
     generate_tangents(&mut translucent);
 
     ChunkMeshGroup {

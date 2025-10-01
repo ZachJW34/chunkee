@@ -9,8 +9,8 @@ use chunkee_core::{
     glam::{IVec3, Vec3},
     hasher::VoxelHashMap,
     meshing::ChunkMeshData,
-    metrics::Metrics,
-    world::{ChunkeeWorld, ChunkeeWorldConfig, VoxelRaycast},
+    metrics::{HistogramMetrics, MetricsPrinter, MetricsRegistry},
+    world::{CHUNKEE_CORE_METRICS, ChunkeeWorld, ChunkeeWorldConfig, VoxelRaycast},
 };
 use godot::{
     classes::{
@@ -23,8 +23,19 @@ use godot::{
     obj::NewAlloc,
     prelude::*,
 };
+use once_cell::sync::Lazy;
 
 use crate::{conversions::*, generator::WorldGenerator, voxels::MyVoxels};
+
+define_metrics! {
+    enum Histograms {
+        Process => "ChunkeeGodot::process",
+        Render => "ChunkeeGodot::render",
+    }
+}
+
+static CHUNKEE_GODOT_METRICS: Lazy<MetricsRegistry<Histograms, HistogramMetrics>> =
+    Lazy::new(|| MetricsRegistry::new());
 
 struct ChunkeeGodotExtension;
 
@@ -42,8 +53,8 @@ pub struct ChunkeeWorldNode {
     world_scenario: Rid,
     voxel_raycast: VoxelRaycast<MyVoxels>,
     outline_node: Option<Gd<MeshInstance3D>>,
-    metrics: Metrics<ChunkeeWorldNodeMetrics>,
     pub show_physics_debug_mesh: bool,
+    printer: MetricsPrinter,
     #[export]
     pub opaque_material: Option<Gd<ShaderMaterial>>,
     #[export]
@@ -57,13 +68,14 @@ impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
         env_logger::init();
         println!("Initializing ChunkeeWorldNode");
-        let voxel_size = 0.5;
+        let voxel_size = 1.0;
         let config = ChunkeeWorldConfig {
             radius: 12,
             generator: Box::new(WorldGenerator::new()),
             voxel_size,
         };
         let voxel_world: ChunkeeWorld<MyVoxels> = ChunkeeWorld::new(config);
+        let printer = MetricsPrinter::new(Duration::from_secs(5));
 
         Self {
             base,
@@ -77,8 +89,8 @@ impl IStaticBody3D for ChunkeeWorldNode {
             voxel_raycast: VoxelRaycast::None,
             outline_node: None,
             show_physics_debug_mesh: false,
-            metrics: Metrics::new(Duration::from_secs(2)),
             voxel_size,
+            printer,
         }
     }
 
@@ -101,7 +113,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
     fn process(&mut self, _delta: f64) {
         if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
             let process_time = Instant::now();
-            let camera_pos = Vec3::from_array(camera.get_global_position().to_array());
+            let camera_data = camera.to_camera_data();
             self.voxel_world.update(camera.to_camera_data());
             let input = Input::singleton();
 
@@ -112,14 +124,9 @@ impl IStaticBody3D for ChunkeeWorldNode {
                 }
             }
 
-            let forward_direction = -camera.get_global_transform().basis.col_c();
-            let raycast_time = Instant::now();
             self.voxel_raycast =
                 self.voxel_world
-                    .try_raycast(camera_pos, forward_direction.as_vec3(), 100);
-            self.metrics
-                .get_mut(ChunkeeWorldNodeMetrics::Raycast)
-                .record(raycast_time.elapsed());
+                    .try_raycast(camera_data.pos, camera_data.forward, 100);
 
             if input.is_action_pressed("break_block")
                 && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
@@ -165,10 +172,15 @@ impl IStaticBody3D for ChunkeeWorldNode {
 
             self.render();
 
-            self.metrics
-                .get_mut(ChunkeeWorldNodeMetrics::Process)
+            CHUNKEE_GODOT_METRICS
+                .get(Histograms::Process)
                 .record(process_time.elapsed());
-            self.metrics.batch_print();
+
+            self.printer.batch_print(&[
+                &*CHUNKEE_GODOT_METRICS,
+                &CHUNKEE_CORE_METRICS.histograms,
+                &CHUNKEE_CORE_METRICS.throughputs,
+            ]);
         } else {
             println!("Cannot update without camera")
         }
@@ -214,14 +226,6 @@ const ARRAY_TEX_UV: usize = 4;
 const ARRAY_CUSTOM0: usize = 6;
 const ARRAY_INDEX: usize = 12;
 const ARRAY_MAX: usize = 13;
-
-define_metrics! {
-    enum ChunkeeWorldNodeMetrics {
-        Process => "ChunkeeWorldNode::process",
-        Render => "ChunkeeWorldNode::render",
-        Raycast => "ChunkeeWorld::try_raycast"
-    }
-}
 
 #[godot_api]
 impl ChunkeeWorldNode {
@@ -297,8 +301,8 @@ impl ChunkeeWorldNode {
             }
 
             if mesh_queue_len > 0 {
-                self.metrics
-                    .get_mut(ChunkeeWorldNodeMetrics::Render)
+                CHUNKEE_GODOT_METRICS
+                    .get(Histograms::Render)
                     .record(mesh_render_time.elapsed());
             }
         }

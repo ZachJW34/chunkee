@@ -1,6 +1,6 @@
 use glam::{IVec3, Vec3};
 
-use crate::coords::{CHUNK_SIZE, vec3_wv_to_cv, cv_to_wv};
+use crate::coords::{CHUNK_SIZE, cv_to_wv, vec3_wv_to_cv};
 
 // const LOD1_DIST: f32 = 8.0 * CHUNK_SIZE as f32;
 // const LOD2_DIST: f32 = 16.0 * CHUNK_SIZE as f32;
@@ -67,6 +67,7 @@ pub struct Frustum {
 pub struct CameraData {
     pub pos: Vec3,
     pub frustum: Frustum,
+    pub forward: Vec3,
 }
 
 impl Frustum {

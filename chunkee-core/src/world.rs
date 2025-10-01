@@ -1,19 +1,52 @@
 use crate::{
     block::{ChunkeeVoxel, Rotation, VoxelId},
-    coords::{ChunkVector, WorldVector, wv_to_cv, wv_to_lv},
+    coords::{ChunkVector, WorldVector, vec3_wv_to_cv, wv_to_cv, wv_to_lv},
+    define_metrics,
     generation::VoxelGenerator,
     grid::ChunkManager,
     meshing::ChunkMeshGroup,
-    pipeline::{PhysicsEntity, PipelineMessage, spawn_pipeline_thread},
+    metrics::{HistogramMetrics, MetricsRegistry, ThroughputMetrics},
+    pipeline::{PhysicsEntity, WorkerPool, WorkerSharedState},
     storage::ChunkStore,
-    streaming::CameraData,
+    streaming::{CameraData, calc_total_chunks},
     traversal::DDAState,
 };
 use block_mesh::VoxelVisibility;
 use crossbeam::queue::SegQueue;
-use crossbeam_channel::Sender;
 use glam::{IVec3, Vec3};
-use std::{marker::PhantomData, sync::Arc, thread::JoinHandle};
+use once_cell::sync::Lazy;
+use std::{marker::PhantomData, sync::Arc, time::Instant};
+
+define_metrics! {
+    pub enum Histograms {
+        ReprioritizeQueues => "ChunkeeCore::RepriortizeQueues",
+        GridUpdate => "ChunkeeCore::GridUpdate",
+        Load => "ChunkeeCore::Load",
+        Generate => "ChunkeeCore::Generate",
+        LoadTask => "ChunkeeCore::LoadTask",
+        MeshTask => "ChunkeeCore::MeshTask",
+        PhysicsTask => "ChunkeeCore::PhysicsTask",
+        TryRaycast => "ChunkeeCore::TryRaycast",
+    }
+}
+
+define_metrics! {
+    pub enum Throughputs {
+        Tasks => "ChunkeeCore::Task"
+    }
+}
+
+pub struct ChunkeeCoreMetrics {
+    pub histograms: MetricsRegistry<Histograms, HistogramMetrics>,
+    pub throughputs: MetricsRegistry<Throughputs, ThroughputMetrics>,
+}
+
+pub static CHUNKEE_CORE_METRICS: Lazy<ChunkeeCoreMetrics> = Lazy::new(|| ChunkeeCoreMetrics {
+    histograms: MetricsRegistry::new(),
+    throughputs: MetricsRegistry::new(),
+});
+
+const CAMERA_THRESHOLD_RADIANS: f32 = 1.0;
 
 pub struct ChunkeeWorldConfig {
     pub radius: u32,
@@ -28,7 +61,7 @@ pub type EditsAppliedQueue = SegQueue<(IVec3, VoxelId)>;
 
 pub struct ResultQueues {
     pub mesh_load: SegQueue<(ChunkVector, ChunkMeshGroup)>,
-    pub mesh_unload: SegQueue<ChunkVector>,
+    // pub mesh_unload: SegQueue<ChunkVector>,
     pub physics_load: SegQueue<(ChunkVector, Vec<Vec3>)>,
     pub physics_unload: SegQueue<ChunkVector>,
     pub edits: SegQueue<(WorldVector, VoxelId)>,
@@ -38,9 +71,10 @@ pub struct ChunkeeWorld<V: ChunkeeVoxel> {
     pub results: Arc<ResultQueues>,
     pub radius: u32,
     chunk_manager: Arc<ChunkManager>,
-    camera_pos: Vec3,
+    camera_data: Option<CameraData>,
     chunk_store: Arc<ChunkStore>,
-    pipeline: Option<Pipeline>,
+    worker_state: Arc<WorkerSharedState>,
+    worker_pool: Option<WorkerPool>,
     generator: Arc<Box<dyn VoxelGenerator>>,
     pub voxel_size: f32,
     _voxel_type: PhantomData<V>,
@@ -59,11 +93,13 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         let generator = Arc::new(generator);
         let results = Arc::new(ResultQueues {
             mesh_load: SegQueue::new(),
-            mesh_unload: SegQueue::new(),
+            // mesh_unload: SegQueue::new(),
             physics_load: SegQueue::new(),
             physics_unload: SegQueue::new(),
             edits: SegQueue::new(),
         });
+        let total_tasks = calc_total_chunks(radius) as usize;
+        let worker_state = Arc::new(WorkerSharedState::new(total_tasks));
 
         Self {
             results,
@@ -71,72 +107,77 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
             chunk_store,
             radius,
             generator,
-            camera_pos: Vec3::NAN,
-            pipeline: None,
+            camera_data: None,
+            worker_state,
+            worker_pool: None,
             voxel_size,
             _voxel_type: PhantomData,
         }
     }
 
     pub fn enable_pipeline(&mut self) {
-        if self.pipeline.is_none() {
-            let (pipeline_sender, pipeline_receiver) = crossbeam_channel::unbounded();
-            let pipeline_handle = spawn_pipeline_thread::<V>(
+        if self.worker_pool.is_none() {
+            let worker_pool = WorkerPool::new::<V>(
+                4,
+                self.worker_state.clone(),
                 self.chunk_manager.clone(),
                 self.chunk_store.clone(),
                 self.generator.clone(),
-                pipeline_receiver,
                 self.results.clone(),
-                self.radius,
                 self.voxel_size,
             );
-            self.pipeline = Some(Pipeline {
-                handle: pipeline_handle,
-                sender: pipeline_sender,
-            })
+
+            self.worker_pool = Some(worker_pool)
         }
     }
 
     pub fn disable_pipeline(&mut self) {
-        if let Some(pipeline) = self.pipeline.take() {
-            pipeline.sender.send(PipelineMessage::Shutdown).ok();
-            pipeline.handle.join().ok();
-        };
+        if let Some(_worker_pool) = self.worker_pool.take() {};
     }
 
     pub fn update(&mut self, camera_data: CameraData) {
-        let pipeline = if let Some(pipeline) = self.pipeline.as_ref() {
-            pipeline
-        } else {
-            return;
-        };
+        if let Some(worker_pool) = self.worker_pool.as_ref() {
+            // metrics
+            if !self.worker_state.load.is_empty()
+                || !self.worker_state.mesh.is_empty()
+                || !self.worker_state.physics.is_empty()
+            {
+                CHUNKEE_CORE_METRICS
+                    .throughputs
+                    .get(Throughputs::Tasks)
+                    .start();
+            } else {
+                CHUNKEE_CORE_METRICS
+                    .throughputs
+                    .get(Throughputs::Tasks)
+                    .end();
+            }
+            if self.camera_data.is_none_or(|previous| {
+                let current_cv = vec3_wv_to_cv(camera_data.pos, self.voxel_size);
+                let previous_cv = vec3_wv_to_cv(previous.pos, self.voxel_size);
 
-        if self.camera_pos != camera_data.pos {
-            self.camera_pos = camera_data.pos;
-            pipeline
-                .sender
-                .send(PipelineMessage::CameraDataUpdate(camera_data))
-                .ok();
+                (current_cv != previous_cv)
+                    || (camera_data.forward.angle_between(previous.forward)
+                        > CAMERA_THRESHOLD_RADIANS)
+            }) {
+                self.worker_state.camera_update.push(camera_data);
+                worker_pool.sender.send(()).ok();
+                self.camera_data = Some(camera_data);
+            }
         }
     }
 
     pub fn set_voxels_at(&self, changes: &[(WorldVector, V)]) {
-        let pipeline = if let Some(pipeline) = self.pipeline.as_ref() {
-            pipeline
-        } else {
-            return;
-        };
+        if let Some(worker_pool) = self.worker_pool.as_ref() {
+            let edits: Vec<(WorldVector, VoxelId)> = changes
+                .iter()
+                .map(|(wv, voxel)| (*wv, VoxelId::new((*voxel).into(), Rotation::default())))
+                .collect();
 
-        let edits: Vec<(WorldVector, VoxelId)> = changes
-            .iter()
-            .map(|(wv, voxel)| (*wv, VoxelId::new((*voxel).into(), Rotation::default())))
-            .collect();
-
-        if !edits.is_empty() {
-            pipeline
-                .sender
-                .send(PipelineMessage::ChunkEdits(edits))
-                .ok();
+            if !edits.is_empty() {
+                self.worker_state.chunk_edits.push(edits);
+                worker_pool.sender.send(()).ok();
+            }
         }
     }
 
@@ -146,50 +187,53 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
         ray_direction: Vec3,
         max_steps: u32,
     ) -> VoxelRaycast<V> {
+        let time = Instant::now();
         let mut dda =
             DDAState::from_pos_and_dir((ray_origin / self.voxel_size).into(), ray_direction.into());
 
-        for _ in 0..(max_steps as usize) {
-            let pos = dda.next_voxelpos;
-            let cv = wv_to_cv(pos);
-            if let Some(res) = self.chunk_manager.try_read(cv, |wc| {
-                if !wc.is_stable() {
-                    return Some(VoxelRaycast::None);
-                }
+        let result = {
+            for _ in 0..(max_steps as usize) {
+                let pos = dda.next_voxelpos;
+                let cv = wv_to_cv(pos);
+                if let Some(res) = self.chunk_manager.try_read(cv, |wc| {
+                    if !wc.is_stable() {
+                        return Some(VoxelRaycast::None);
+                    }
 
-                let lv = wv_to_lv(pos);
-                let voxel_id = wc.chunk.get_voxel(lv);
-                let voxel = V::from(voxel_id.type_id());
-                if voxel.visibilty() != VoxelVisibility::Empty {
-                    return Some(VoxelRaycast::Hit((pos, voxel)));
-                }
+                    let lv = wv_to_lv(pos);
+                    let voxel_id = wc.chunk.get_voxel(lv);
+                    let voxel = V::from(voxel_id.type_id());
+                    if voxel.visibilty() != VoxelVisibility::Empty {
+                        return Some(VoxelRaycast::Hit((pos, voxel)));
+                    }
 
-                None
-            }) {
-                if let Some(vr) = res {
-                    return vr;
+                    None
+                }) {
+                    if let Some(vr) = res {
+                        return vr;
+                    } else {
+                        dda.step_mut();
+                    }
                 } else {
-                    dda.step_mut();
+                    return VoxelRaycast::None;
                 }
-            } else {
-                return VoxelRaycast::None;
             }
-        }
 
-        VoxelRaycast::Miss
+            VoxelRaycast::Miss
+        };
+
+        CHUNKEE_CORE_METRICS
+            .histograms
+            .get(Histograms::TryRaycast)
+            .record(time.elapsed());
+        result
     }
 
     pub fn update_physics_entities(&self, entities: Vec<PhysicsEntity>) {
-        let pipeline = if let Some(pipeline) = self.pipeline.as_ref() {
-            pipeline
-        } else {
-            return;
-        };
-
-        pipeline
-            .sender
-            .send(PipelineMessage::PhysicsEntitiesUpdate(entities))
-            .ok();
+        if let Some(worker_pool) = self.worker_pool.as_ref() {
+            self.worker_state.physics_entities.push(entities);
+            worker_pool.sender.send(()).ok();
+        }
     }
 
     pub fn chunk_in_range(&self, cv: ChunkVector) -> bool {
@@ -204,9 +248,4 @@ pub enum VoxelRaycast<V: ChunkeeVoxel> {
     Hit((WorldVector, V)),
     Miss,
     None,
-}
-
-struct Pipeline {
-    pub handle: JoinHandle<()>,
-    pub sender: Sender<PipelineMessage>,
 }

@@ -118,7 +118,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeWorld<V> {
     pub fn enable_pipeline(&mut self) {
         if self.worker_pool.is_none() {
             let worker_pool = WorkerPool::new::<V>(
-                4,
+                1,
                 self.worker_state.clone(),
                 self.chunk_manager.clone(),
                 self.chunk_store.clone(),

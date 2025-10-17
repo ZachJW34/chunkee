@@ -8,6 +8,7 @@ use chunkee_core::{
     define_metrics,
     glam::{IVec3, Vec3},
     hasher::VoxelHashMap,
+    manager::{ChunkeeConfig, ChunkeeWorldManager, Update},
     meshing::ChunkMeshData,
     metrics::{HistogramMetrics, MetricsPrinter, MetricsRegistry},
     world::{CHUNKEE_CORE_METRICS, ChunkeeWorld, ChunkeeWorldConfig, VoxelRaycast},
@@ -42,182 +43,305 @@ struct ChunkeeGodotExtension;
 #[gdextension]
 unsafe impl ExtensionLibrary for ChunkeeGodotExtension {}
 
-#[derive(GodotClass)]
-#[class(base=StaticBody3D)]
-pub struct ChunkeeWorldNode {
-    base: Base<StaticBody3D>,
-    voxel_world: ChunkeeWorld<MyVoxels>,
-    rendered_chunks: VoxelHashMap<Vec<(Rid, Rid)>>,
-    physics_chunks: VoxelHashMap<Gd<CollisionShape3D>>,
-    physics_debug_meshes: VoxelHashMap<Gd<MeshInstance3D>>,
-    world_scenario: Rid,
-    voxel_raycast: VoxelRaycast<MyVoxels>,
-    outline_node: Option<Gd<MeshInstance3D>>,
-    pub show_physics_debug_mesh: bool,
-    printer: MetricsPrinter,
-    #[export]
-    pub opaque_material: Option<Gd<ShaderMaterial>>,
-    #[export]
-    pub translucent_material: Option<Gd<ShaderMaterial>>,
-    #[export]
-    pub voxel_size: f32,
-}
+// #[derive(GodotClass)]
+// #[class(base=StaticBody3D)]
+// pub struct ChunkeeWorldNode {
+//     base: Base<StaticBody3D>,
+//     voxel_world: ChunkeeWorld<MyVoxels>,
+//     rendered_chunks: VoxelHashMap<Vec<(Rid, Rid)>>,
+//     physics_chunks: VoxelHashMap<Gd<CollisionShape3D>>,
+//     physics_debug_meshes: VoxelHashMap<Gd<MeshInstance3D>>,
+//     world_scenario: Rid,
+//     voxel_raycast: VoxelRaycast<MyVoxels>,
+//     outline_node: Option<Gd<MeshInstance3D>>,
+//     pub show_physics_debug_mesh: bool,
+//     printer: MetricsPrinter,
+//     #[export]
+//     pub opaque_material: Option<Gd<ShaderMaterial>>,
+//     #[export]
+//     pub translucent_material: Option<Gd<ShaderMaterial>>,
+//     #[export]
+//     pub voxel_size: f32,
+// }
 
-#[godot_api]
-impl IStaticBody3D for ChunkeeWorldNode {
-    fn init(base: Base<StaticBody3D>) -> Self {
-        env_logger::init();
-        println!("Initializing ChunkeeWorldNode");
-        let voxel_size = 1.0;
-        let config = ChunkeeWorldConfig {
-            radius: 12,
-            generator: Box::new(WorldGenerator::new()),
-            voxel_size,
-        };
-        let voxel_world: ChunkeeWorld<MyVoxels> = ChunkeeWorld::new(config);
-        let printer = MetricsPrinter::new(Duration::from_secs(5));
+// #[godot_api]
+// impl IStaticBody3D for ChunkeeWorldNode {
+//     fn init(base: Base<StaticBody3D>) -> Self {
+//         env_logger::init();
+//         println!("Initializing ChunkeeWorldNode");
+//         let voxel_size = 1.0;
+//         let config = ChunkeeWorldConfig {
+//             radius: 12,
+//             generator: Box::new(WorldGenerator::new()),
+//             voxel_size,
+//         };
+//         let voxel_world: ChunkeeWorld<MyVoxels> = ChunkeeWorld::new(config);
+//         let printer = MetricsPrinter::new(Duration::from_secs(5));
 
-        Self {
-            base,
-            voxel_world,
-            world_scenario: Rid::Invalid,
-            rendered_chunks: Default::default(),
-            physics_chunks: Default::default(),
-            physics_debug_meshes: Default::default(),
-            opaque_material: None,
-            translucent_material: None,
-            voxel_raycast: VoxelRaycast::None,
-            outline_node: None,
-            show_physics_debug_mesh: false,
-            voxel_size,
-            printer,
-        }
-    }
+//         Self {
+//             base,
+//             voxel_world,
+//             world_scenario: Rid::Invalid,
+//             rendered_chunks: Default::default(),
+//             physics_chunks: Default::default(),
+//             physics_debug_meshes: Default::default(),
+//             opaque_material: None,
+//             translucent_material: None,
+//             voxel_raycast: VoxelRaycast::None,
+//             outline_node: None,
+//             show_physics_debug_mesh: false,
+//             voxel_size,
+//             printer,
+//         }
+//     }
 
-    fn ready(&mut self) {
-        let world = self
-            .base()
-            .get_world_3d()
-            .expect("ChunkeeWorldNode must be placed in a 3D world.");
-        self.world_scenario = world.get_scenario();
-        godot_print!("World Scenario RID: {:?}", self.world_scenario);
+//     fn ready(&mut self) {
+//         let world = self
+//             .base()
+//             .get_world_3d()
+//             .expect("ChunkeeWorldNode must be placed in a 3D world.");
+//         self.world_scenario = world.get_scenario();
+//         godot_print!("World Scenario RID: {:?}", self.world_scenario);
 
-        let mut outline = create_voxel_outline(self.voxel_size);
-        outline.set_visible(false);
-        self.base_mut().add_child(&outline);
-        self.outline_node = Some(outline);
+//         let mut outline = create_voxel_outline(self.voxel_size);
+//         outline.set_visible(false);
+//         self.base_mut().add_child(&outline);
+//         self.outline_node = Some(outline);
 
-        self.voxel_world.enable_pipeline();
-    }
+//         self.voxel_world.enable_pipeline();
+//     }
 
-    fn process(&mut self, _delta: f64) {
-        if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
-            let process_time = Instant::now();
-            let camera_data = camera.to_camera_data();
-            self.voxel_world.update(camera.to_camera_data());
-            let input = Input::singleton();
+//     fn process(&mut self, _delta: f64) {
+//         if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
+//             let process_time = Instant::now();
+//             let camera_data = camera.to_camera_data();
+//             self.voxel_world.update(camera.to_camera_data());
+//             let input = Input::singleton();
 
-            if input.is_action_just_pressed("toggle_debug_physics_mesh") {
-                self.show_physics_debug_mesh = !self.show_physics_debug_mesh;
-                for (_, mesh) in self.physics_debug_meshes.iter_mut() {
-                    mesh.set_visible(self.show_physics_debug_mesh)
-                }
-            }
+//             if input.is_action_just_pressed("toggle_debug_physics_mesh") {
+//                 self.show_physics_debug_mesh = !self.show_physics_debug_mesh;
+//                 for (_, mesh) in self.physics_debug_meshes.iter_mut() {
+//                     mesh.set_visible(self.show_physics_debug_mesh)
+//                 }
+//             }
 
-            self.voxel_raycast =
-                self.voxel_world
-                    .try_raycast(camera_data.pos, camera_data.forward, 100);
+//             self.voxel_raycast =
+//                 self.voxel_world
+//                     .try_raycast(camera_data.pos, camera_data.forward, 100);
 
-            if input.is_action_pressed("break_block")
-                && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
-            {
-                let radius = 10;
-                let radius_sq = radius * radius;
-                let mut sphere_removals = vec![];
+//             if input.is_action_pressed("break_block")
+//                 && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
+//             {
+//                 let radius = 10;
+//                 let radius_sq = radius * radius;
+//                 let mut sphere_removals = vec![];
 
-                for x in -radius..=radius {
-                    for y in -radius..=radius {
-                        for z in -radius..=radius {
-                            let offset = IVec3::new(x, y, z);
-                            if offset.length_squared() <= radius_sq {
-                                let wv = hit.0 + offset;
-                                sphere_removals.push((wv, MyVoxels::Air));
-                            }
-                        }
-                    }
-                }
-                self.voxel_world.set_voxels_at(&sphere_removals);
-            }
+//                 for x in -radius..=radius {
+//                     for y in -radius..=radius {
+//                         for z in -radius..=radius {
+//                             let offset = IVec3::new(x, y, z);
+//                             if offset.length_squared() <= radius_sq {
+//                                 let wv = hit.0 + offset;
+//                                 sphere_removals.push((wv, MyVoxels::Air));
+//                             }
+//                         }
+//                     }
+//                 }
+//                 self.voxel_world.set_voxels_at(&sphere_removals);
+//             }
 
-            if input.is_action_just_pressed("add_block")
-                && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
-            {
-                let radius = 10;
-                let radius_sq = radius * radius;
-                let mut sphere_removals = vec![];
+//             if input.is_action_just_pressed("add_block")
+//                 && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
+//             {
+//                 let radius = 10;
+//                 let radius_sq = radius * radius;
+//                 let mut sphere_removals = vec![];
 
-                for x in -radius..=radius {
-                    for y in -radius..=radius {
-                        for z in -radius..=radius {
-                            let offset = IVec3::new(x, y, z);
-                            if offset.length_squared() <= radius_sq {
-                                let wv = hit.0 + offset;
-                                sphere_removals.push((wv, MyVoxels::Stone));
-                            }
-                        }
-                    }
-                }
-                self.voxel_world.set_voxels_at(&sphere_removals);
-            }
+//                 for x in -radius..=radius {
+//                     for y in -radius..=radius {
+//                         for z in -radius..=radius {
+//                             let offset = IVec3::new(x, y, z);
+//                             if offset.length_squared() <= radius_sq {
+//                                 let wv = hit.0 + offset;
+//                                 sphere_removals.push((wv, MyVoxels::Stone));
+//                             }
+//                         }
+//                     }
+//                 }
+//                 self.voxel_world.set_voxels_at(&sphere_removals);
+//             }
 
-            self.render();
+//             self.render();
 
-            CHUNKEE_GODOT_METRICS
-                .get(Histograms::Process)
-                .record(process_time.elapsed());
+//             CHUNKEE_GODOT_METRICS
+//                 .get(Histograms::Process)
+//                 .record(process_time.elapsed());
 
-            self.printer.batch_print(&[
-                &*CHUNKEE_GODOT_METRICS,
-                &CHUNKEE_CORE_METRICS.histograms,
-                &CHUNKEE_CORE_METRICS.throughputs,
-            ]);
-        } else {
-            println!("Cannot update without camera")
-        }
-    }
+//             self.printer.batch_print(&[
+//                 &*CHUNKEE_GODOT_METRICS,
+//                 &CHUNKEE_CORE_METRICS.histograms,
+//                 &CHUNKEE_CORE_METRICS.throughputs,
+//             ]);
+//         } else {
+//             println!("Cannot update without camera")
+//         }
+//     }
 
-    fn physics_process(&mut self, _delta: f64) {
-        if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
-            let camera_pos = Vec3::from_array(camera.get_global_position().to_array());
+//     fn physics_process(&mut self, _delta: f64) {
+//         if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
+//             let camera_pos = Vec3::from_array(camera.get_global_position().to_array());
 
-            let mut entities = Vec::new();
-            entities.push(chunkee_core::pipeline::PhysicsEntity {
-                id: camera.instance_id().to_i64(),
-                pos: camera_pos,
-            });
+//             let mut entities = Vec::new();
+//             entities.push(chunkee_core::pipeline::PhysicsEntity {
+//                 id: camera.instance_id().to_i64(),
+//                 pos: camera_pos,
+//             });
 
-            self.voxel_world.update_physics_entities(entities);
-            self.process_physics_meshes();
-        }
-    }
-    fn exit_tree(&mut self) {
-        godot_print!("Exiting tree, cleaning up all rendering server RIDs.");
-        let mut rs = RenderingServer::singleton();
+//             self.voxel_world.update_physics_entities(entities);
+//             self.process_physics_meshes();
+//         }
+//     }
+//     fn exit_tree(&mut self) {
+//         godot_print!("Exiting tree, cleaning up all rendering server RIDs.");
+//         let mut rs = RenderingServer::singleton();
 
-        for (_, rids_to_free) in self.rendered_chunks.drain() {
-            for (instance_rid, mesh_rid) in rids_to_free {
-                if instance_rid.is_valid() {
-                    rs.instance_set_scenario(instance_rid, Rid::Invalid);
-                    rs.free_rid(instance_rid);
-                }
-                if mesh_rid.is_valid() {
-                    rs.free_rid(mesh_rid);
-                }
-            }
-        }
-        godot_print!("Rendering server cleanup complete.");
-    }
-}
+//         for (_, rids_to_free) in self.rendered_chunks.drain() {
+//             for (instance_rid, mesh_rid) in rids_to_free {
+//                 if instance_rid.is_valid() {
+//                     rs.instance_set_scenario(instance_rid, Rid::Invalid);
+//                     rs.free_rid(instance_rid);
+//                 }
+//                 if mesh_rid.is_valid() {
+//                     rs.free_rid(mesh_rid);
+//                 }
+//             }
+//         }
+//         godot_print!("Rendering server cleanup complete.");
+//     }
+// }
+
+// #[godot_api]
+// impl ChunkeeWorldNode {
+//     fn render(&mut self) {
+//         let mesh_render_time = Instant::now();
+//         let mut rs = RenderingServer::singleton();
+
+//         let drain_limit = 100;
+
+//         self.rendered_chunks.retain(|cv, rids| {
+//             if !self.voxel_world.chunk_in_range(*cv) {
+//                 for (instance_rid, mesh_rid) in rids {
+//                     rs.free_rid(*instance_rid);
+//                     rs.free_rid(*mesh_rid);
+//                 }
+
+//                 return false;
+//             }
+
+//             true
+//         });
+
+//         if let (Some(opaque_material), Some(translucent_material)) =
+//             (&self.opaque_material, &self.translucent_material)
+//         {
+//             let mesh_queue_len = self.voxel_world.results.mesh_load.len();
+
+//             for _ in 0..drain_limit {
+//                 let Some((cv, mesh_group)) = self.voxel_world.results.mesh_load.pop() else {
+//                     break;
+//                 };
+
+//                 if let Some(old_rids) = self.rendered_chunks.remove(&cv) {
+//                     for (instance_rid, mesh_rid) in old_rids {
+//                         rs.free_rid(instance_rid);
+//                         rs.free_rid(mesh_rid);
+//                     }
+//                 }
+
+//                 let mut new_rids = Vec::new();
+//                 if !mesh_group.opaque.positions.is_empty() {
+//                     let (instance_rid, mesh_rid) = create_render_instance(
+//                         self.world_scenario,
+//                         mesh_group.opaque,
+//                         opaque_material,
+//                     );
+//                     new_rids.push((instance_rid, mesh_rid));
+//                 }
+
+//                 if !mesh_group.translucent.positions.is_empty() {
+//                     let (instance_rid, mesh_rid) = create_render_instance(
+//                         self.world_scenario,
+//                         mesh_group.translucent,
+//                         translucent_material,
+//                     );
+//                     new_rids.push((instance_rid, mesh_rid));
+//                 }
+
+//                 if !new_rids.is_empty() {
+//                     self.rendered_chunks.insert(cv, new_rids);
+//                 }
+//             }
+
+//             if let Some(outline_node) = self.outline_node.as_mut() {
+//                 if let VoxelRaycast::Hit((wv, _)) = self.voxel_raycast {
+//                     let scaled_wv =
+//                         Vector3::new(wv.x as f32, wv.y as f32, wv.z as f32) * self.voxel_size;
+//                     outline_node.set_position(scaled_wv.to_godot());
+//                     outline_node.set_visible(true);
+//                 } else {
+//                     outline_node.set_visible(false);
+//                 }
+//             }
+
+//             if mesh_queue_len > 0 {
+//                 CHUNKEE_GODOT_METRICS
+//                     .get(Histograms::Render)
+//                     .record(mesh_render_time.elapsed());
+//             }
+//         }
+//     }
+
+//     fn process_physics_meshes(&mut self) {
+//         if let Some((cv, triangles)) = self.voxel_world.results.physics_load.pop() {
+//             if triangles.is_empty() {
+//                 if let Some(mut old_debug_mesh) = self.physics_debug_meshes.remove(&cv) {
+//                     old_debug_mesh.queue_free();
+//                 }
+
+//                 if let Some(mut old_col) = self.physics_chunks.remove(&cv) {
+//                     old_col.queue_free();
+//                 }
+//             } else {
+//                 // --- Debug Visualization Mesh ---
+//                 let mut debug_mesh_instance = create_physics_debug_mesh(triangles.clone());
+//                 debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
+//                 self.base_mut().add_child(&debug_mesh_instance);
+//                 if let Some(mut old_debug_mesh) =
+//                     self.physics_debug_meshes.insert(cv, debug_mesh_instance)
+//                 {
+//                     old_debug_mesh.queue_free();
+//                 }
+//                 // ---------------------------------------
+
+//                 let collision_shape_node = create_physics_mesh(triangles);
+//                 self.base_mut().add_child(&collision_shape_node);
+//                 if let Some(mut old_col) = self.physics_chunks.insert(cv, collision_shape_node) {
+//                     old_col.queue_free();
+//                 }
+//             }
+//         }
+
+//         if let Some(cv) = self.voxel_world.results.physics_unload.pop() {
+//             if let Some(mut shape_to_remove) = self.physics_chunks.remove(&cv) {
+//                 shape_to_remove.queue_free();
+//             }
+
+//             if let Some(mut debug_mesh_to_remove) = self.physics_debug_meshes.remove(&cv) {
+//                 debug_mesh_to_remove.queue_free();
+//             }
+//         }
+//     }
+// }
 
 const ARRAY_VERTEX: usize = 0;
 const ARRAY_NORMAL: usize = 1;
@@ -226,129 +350,6 @@ const ARRAY_TEX_UV: usize = 4;
 const ARRAY_CUSTOM0: usize = 6;
 const ARRAY_INDEX: usize = 12;
 const ARRAY_MAX: usize = 13;
-
-#[godot_api]
-impl ChunkeeWorldNode {
-    fn render(&mut self) {
-        let mesh_render_time = Instant::now();
-        let mut rs = RenderingServer::singleton();
-
-        let drain_limit = 100;
-
-        self.rendered_chunks.retain(|cv, rids| {
-            if !self.voxel_world.chunk_in_range(*cv) {
-                for (instance_rid, mesh_rid) in rids {
-                    rs.free_rid(*instance_rid);
-                    rs.free_rid(*mesh_rid);
-                }
-
-                return false;
-            }
-
-            true
-        });
-
-        if let (Some(opaque_material), Some(translucent_material)) =
-            (&self.opaque_material, &self.translucent_material)
-        {
-            let mesh_queue_len = self.voxel_world.results.mesh_load.len();
-
-            for _ in 0..drain_limit {
-                let Some((cv, mesh_group)) = self.voxel_world.results.mesh_load.pop() else {
-                    break;
-                };
-
-                if let Some(old_rids) = self.rendered_chunks.remove(&cv) {
-                    for (instance_rid, mesh_rid) in old_rids {
-                        rs.free_rid(instance_rid);
-                        rs.free_rid(mesh_rid);
-                    }
-                }
-
-                let mut new_rids = Vec::new();
-                if !mesh_group.opaque.positions.is_empty() {
-                    let (instance_rid, mesh_rid) = create_render_instance(
-                        self.world_scenario,
-                        mesh_group.opaque,
-                        opaque_material,
-                    );
-                    new_rids.push((instance_rid, mesh_rid));
-                }
-
-                if !mesh_group.translucent.positions.is_empty() {
-                    let (instance_rid, mesh_rid) = create_render_instance(
-                        self.world_scenario,
-                        mesh_group.translucent,
-                        translucent_material,
-                    );
-                    new_rids.push((instance_rid, mesh_rid));
-                }
-
-                if !new_rids.is_empty() {
-                    self.rendered_chunks.insert(cv, new_rids);
-                }
-            }
-
-            if let Some(outline_node) = self.outline_node.as_mut() {
-                if let VoxelRaycast::Hit((wv, _)) = self.voxel_raycast {
-                    let scaled_wv =
-                        Vector3::new(wv.x as f32, wv.y as f32, wv.z as f32) * self.voxel_size;
-                    outline_node.set_position(scaled_wv.to_godot());
-                    outline_node.set_visible(true);
-                } else {
-                    outline_node.set_visible(false);
-                }
-            }
-
-            if mesh_queue_len > 0 {
-                CHUNKEE_GODOT_METRICS
-                    .get(Histograms::Render)
-                    .record(mesh_render_time.elapsed());
-            }
-        }
-    }
-
-    fn process_physics_meshes(&mut self) {
-        if let Some((cv, triangles)) = self.voxel_world.results.physics_load.pop() {
-            if triangles.is_empty() {
-                if let Some(mut old_debug_mesh) = self.physics_debug_meshes.remove(&cv) {
-                    old_debug_mesh.queue_free();
-                }
-
-                if let Some(mut old_col) = self.physics_chunks.remove(&cv) {
-                    old_col.queue_free();
-                }
-            } else {
-                // --- Debug Visualization Mesh ---
-                let mut debug_mesh_instance = create_physics_debug_mesh(triangles.clone());
-                debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
-                self.base_mut().add_child(&debug_mesh_instance);
-                if let Some(mut old_debug_mesh) =
-                    self.physics_debug_meshes.insert(cv, debug_mesh_instance)
-                {
-                    old_debug_mesh.queue_free();
-                }
-                // ---------------------------------------
-
-                let collision_shape_node = create_physics_mesh(triangles);
-                self.base_mut().add_child(&collision_shape_node);
-                if let Some(mut old_col) = self.physics_chunks.insert(cv, collision_shape_node) {
-                    old_col.queue_free();
-                }
-            }
-        }
-
-        if let Some(cv) = self.voxel_world.results.physics_unload.pop() {
-            if let Some(mut shape_to_remove) = self.physics_chunks.remove(&cv) {
-                shape_to_remove.queue_free();
-            }
-
-            if let Some(mut debug_mesh_to_remove) = self.physics_debug_meshes.remove(&cv) {
-                debug_mesh_to_remove.queue_free();
-            }
-        }
-    }
-}
 
 fn create_render_instance(
     scenario: Rid,
@@ -510,4 +511,307 @@ fn create_physics_debug_mesh(triangles: Vec<Vec3>) -> Gd<MeshInstance3D> {
     let mut mesh_instance = MeshInstance3D::new_alloc();
     mesh_instance.set_mesh(&mesh);
     mesh_instance
+}
+
+#[derive(GodotClass)]
+#[class(base=StaticBody3D)]
+pub struct ChunkeeWorldNode {
+    base: Base<StaticBody3D>,
+    voxel_world: ChunkeeWorldManager<MyVoxels>,
+    rendered_chunks: VoxelHashMap<Vec<(Rid, Rid)>>,
+    physics_chunks: VoxelHashMap<Gd<CollisionShape3D>>,
+    physics_debug_meshes: VoxelHashMap<Gd<MeshInstance3D>>,
+    world_scenario: Rid,
+    voxel_raycast: VoxelRaycast<MyVoxels>,
+    outline_node: Option<Gd<MeshInstance3D>>,
+    pub show_physics_debug_mesh: bool,
+    printer: MetricsPrinter,
+    #[export]
+    pub opaque_material: Option<Gd<ShaderMaterial>>,
+    #[export]
+    pub translucent_material: Option<Gd<ShaderMaterial>>,
+    #[export]
+    pub voxel_size: f32,
+}
+
+#[godot_api]
+impl IStaticBody3D for ChunkeeWorldNode {
+    fn init(base: Base<StaticBody3D>) -> Self {
+        env_logger::init();
+        println!("Initializing ChunkeeWorldNode");
+        let voxel_size = 1.0;
+        let config = ChunkeeConfig {
+            radius: 12,
+            generator: Box::new(WorldGenerator::new()),
+            voxel_size,
+            thread_count: 6,
+        };
+        let voxel_world: ChunkeeWorldManager<MyVoxels> = ChunkeeWorldManager::new(config);
+        let printer = MetricsPrinter::new(Duration::from_secs(5));
+
+        Self {
+            base,
+            voxel_world,
+            world_scenario: Rid::Invalid,
+            rendered_chunks: Default::default(),
+            physics_chunks: Default::default(),
+            physics_debug_meshes: Default::default(),
+            opaque_material: None,
+            translucent_material: None,
+            voxel_raycast: VoxelRaycast::None,
+            outline_node: None,
+            show_physics_debug_mesh: false,
+            voxel_size,
+            printer,
+        }
+    }
+
+    fn ready(&mut self) {
+        let world = self
+            .base()
+            .get_world_3d()
+            .expect("ChunkeeWorldNode must be placed in a 3D world.");
+        self.world_scenario = world.get_scenario();
+        godot_print!("World Scenario RID: {:?}", self.world_scenario);
+
+        let mut outline = create_voxel_outline(self.voxel_size);
+        outline.set_visible(false);
+        self.base_mut().add_child(&outline);
+        self.outline_node = Some(outline);
+
+        self.voxel_world.start();
+    }
+
+    fn process(&mut self, _delta: f64) {
+        if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
+            let process_time = Instant::now();
+            let camera_data = camera.to_camera_data();
+            self.voxel_world.update_camera(camera_data);
+            let input = Input::singleton();
+
+            if input.is_action_just_pressed("toggle_debug_physics_mesh") {
+                self.show_physics_debug_mesh = !self.show_physics_debug_mesh;
+                for (_, mesh) in self.physics_debug_meshes.iter_mut() {
+                    mesh.set_visible(self.show_physics_debug_mesh)
+                }
+            }
+
+            // self.voxel_raycast =
+            //     self.voxel_world
+            //         .try_raycast(camera_data.pos, camera_data.forward, 100);
+
+            if input.is_action_pressed("break_block")
+                && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
+            {
+                let radius = 10;
+                let radius_sq = radius * radius;
+                let mut sphere_removals = vec![];
+
+                for x in -radius..=radius {
+                    for y in -radius..=radius {
+                        for z in -radius..=radius {
+                            let offset = IVec3::new(x, y, z);
+                            if offset.length_squared() <= radius_sq {
+                                let wv = hit.0 + offset;
+                                sphere_removals.push((wv, MyVoxels::Air));
+                            }
+                        }
+                    }
+                }
+                self.voxel_world.set_voxels_at(&sphere_removals);
+            }
+
+            if input.is_action_just_pressed("add_block")
+                && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
+            {
+                let radius = 10;
+                let radius_sq = radius * radius;
+                let mut sphere_removals = vec![];
+
+                for x in -radius..=radius {
+                    for y in -radius..=radius {
+                        for z in -radius..=radius {
+                            let offset = IVec3::new(x, y, z);
+                            if offset.length_squared() <= radius_sq {
+                                let wv = hit.0 + offset;
+                                sphere_removals.push((wv, MyVoxels::Stone));
+                            }
+                        }
+                    }
+                }
+                self.voxel_world.set_voxels_at(&sphere_removals);
+            }
+
+            self.render();
+
+            CHUNKEE_GODOT_METRICS
+                .get(Histograms::Process)
+                .record(process_time.elapsed());
+
+            self.printer.batch_print(&[
+                &*CHUNKEE_GODOT_METRICS,
+                &CHUNKEE_CORE_METRICS.histograms,
+                &CHUNKEE_CORE_METRICS.throughputs,
+            ]);
+        } else {
+            println!("Cannot update without camera")
+        }
+    }
+
+    fn physics_process(&mut self, _delta: f64) {
+        if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
+            let camera_pos = Vec3::from_array(camera.get_global_position().to_array());
+
+            let mut entities = Vec::new();
+            entities.push(chunkee_core::pipeline::PhysicsEntity {
+                id: camera.instance_id().to_i64(),
+                pos: camera_pos,
+            });
+
+            // self.voxel_world.update_physics_entities(entities);
+            // self.process_physics_meshes();
+        }
+    }
+    fn exit_tree(&mut self) {
+        godot_print!("Exiting tree, cleaning up all rendering server RIDs.");
+        let mut rs = RenderingServer::singleton();
+
+        for (_, rids_to_free) in self.rendered_chunks.drain() {
+            for (instance_rid, mesh_rid) in rids_to_free {
+                if instance_rid.is_valid() {
+                    rs.instance_set_scenario(instance_rid, Rid::Invalid);
+                    rs.free_rid(instance_rid);
+                }
+                if mesh_rid.is_valid() {
+                    rs.free_rid(mesh_rid);
+                }
+            }
+        }
+        godot_print!("Rendering server cleanup complete.");
+    }
+}
+
+#[godot_api]
+impl ChunkeeWorldNode {
+    fn render(&mut self) {
+        let mesh_render_time = Instant::now();
+        let mut rs = RenderingServer::singleton();
+
+        let drain_limit = 100;
+
+        // self.rendered_chunks.retain(|cv, rids| {
+        //     if !self.voxel_world.chunk_in_range(*cv) {
+        //         for (instance_rid, mesh_rid) in rids {
+        //             rs.free_rid(*instance_rid);
+        //             rs.free_rid(*mesh_rid);
+        //         }
+
+        //         return false;
+        //     }
+
+        //     true
+        // });
+
+        if let (Some(opaque_material), Some(translucent_material)) =
+            (&self.opaque_material, &self.translucent_material)
+        {
+            let queue_len = self.voxel_world.updates.len();
+
+            for _ in 0..drain_limit {
+                let Some(update) = self.voxel_world.updates.pop() else {
+                    break;
+                };
+
+                match update {
+                    Update::Mesh(cv, mesh_group) => {
+                        if let Some(old_rids) = self.rendered_chunks.remove(&cv) {
+                            for (instance_rid, mesh_rid) in old_rids {
+                                rs.free_rid(instance_rid);
+                                rs.free_rid(mesh_rid);
+                            }
+                        }
+
+                        let mut new_rids = Vec::new();
+                        if !mesh_group.opaque.positions.is_empty() {
+                            let (instance_rid, mesh_rid) = create_render_instance(
+                                self.world_scenario,
+                                mesh_group.opaque,
+                                opaque_material,
+                            );
+                            new_rids.push((instance_rid, mesh_rid));
+                        }
+                        if !mesh_group.translucent.positions.is_empty() {
+                            let (instance_rid, mesh_rid) = create_render_instance(
+                                self.world_scenario,
+                                mesh_group.translucent,
+                                translucent_material,
+                            );
+                            new_rids.push((instance_rid, mesh_rid));
+                        }
+
+                        if !new_rids.is_empty() {
+                            self.rendered_chunks.insert(cv, new_rids);
+                        }
+                    }
+                    Update::MeshUnload(cv) => {
+                        if let Some(old_rids) = self.rendered_chunks.remove(&cv) {
+                            for (instance_rid, mesh_rid) in old_rids {
+                                rs.free_rid(instance_rid);
+                                rs.free_rid(mesh_rid);
+                            }
+                        }
+                    }
+                    Update::Physics(ivec3, vec3s) => todo!(),
+                    Update::PhysicsUnload(ivec3) => todo!(),
+                }
+            }
+
+            if queue_len > 0 {
+                CHUNKEE_GODOT_METRICS
+                    .get(Histograms::Render)
+                    .record(mesh_render_time.elapsed());
+            }
+        }
+    }
+
+    // fn process_physics_meshes(&mut self) {
+    //     if let Some((cv, triangles)) = self.voxel_world.results.physics_load.pop() {
+    //         if triangles.is_empty() {
+    //             if let Some(mut old_debug_mesh) = self.physics_debug_meshes.remove(&cv) {
+    //                 old_debug_mesh.queue_free();
+    //             }
+
+    //             if let Some(mut old_col) = self.physics_chunks.remove(&cv) {
+    //                 old_col.queue_free();
+    //             }
+    //         } else {
+    //             // --- Debug Visualization Mesh ---
+    //             let mut debug_mesh_instance = create_physics_debug_mesh(triangles.clone());
+    //             debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
+    //             self.base_mut().add_child(&debug_mesh_instance);
+    //             if let Some(mut old_debug_mesh) =
+    //                 self.physics_debug_meshes.insert(cv, debug_mesh_instance)
+    //             {
+    //                 old_debug_mesh.queue_free();
+    //             }
+    //             // ---------------------------------------
+
+    //             let collision_shape_node = create_physics_mesh(triangles);
+    //             self.base_mut().add_child(&collision_shape_node);
+    //             if let Some(mut old_col) = self.physics_chunks.insert(cv, collision_shape_node) {
+    //                 old_col.queue_free();
+    //             }
+    //         }
+    //     }
+
+    //     if let Some(cv) = self.voxel_world.results.physics_unload.pop() {
+    //         if let Some(mut shape_to_remove) = self.physics_chunks.remove(&cv) {
+    //             shape_to_remove.queue_free();
+    //         }
+
+    //         if let Some(mut debug_mesh_to_remove) = self.physics_debug_meshes.remove(&cv) {
+    //             debug_mesh_to_remove.queue_free();
+    //         }
+    //     }
+    // }
 }

@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::hash_map::Entry,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicU8},
     thread::{self},
     time::Instant,
 };
@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 use crate::{
     block::{BLOCK_FACES, ChunkeeVoxel, VoxelId},
     chunk::{CHUNK_SIDE_32, Chunk},
+    chunk_view::{ChunkGrid, ChunkPool},
     coords::{
         ChunkVector, LocalVector, NEIGHBOR_OFFSETS, cv_to_wv, vec3_wv_to_cv, wv_to_cv, wv_to_lv,
     },
@@ -35,6 +36,7 @@ impl Default for Deltas {
     }
 }
 
+#[inline(always)]
 pub fn neighbors_of(cv: IVec3) -> [ChunkVector; 6] {
     BLOCK_FACES.map(|face| cv + face.into_normal())
 }
@@ -43,18 +45,20 @@ pub fn neighbors_of(cv: IVec3) -> [ChunkVector; 6] {
 pub enum ChunkState {
     None,
     Loading,
+    NeedsMesh,
     Meshing,
-    MeshReady,
+    Meshed,
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum PhysicsState {
     None,
     Meshing,
-    MeshReady,
+    NeedsMesh,
+    Meshed,
 }
 
-type ChunkVersion = u32;
+pub type ChunkVersion = u32;
 
 #[derive(Debug, Clone)]
 pub struct WorldChunk {
@@ -85,7 +89,10 @@ impl Default for WorldChunk {
 
 impl WorldChunk {
     pub fn is_stable(&self) -> bool {
-        matches!(self.state, ChunkState::Meshing | ChunkState::MeshReady)
+        matches!(
+            self.state,
+            ChunkState::NeedsMesh | ChunkState::Meshing | ChunkState::Meshed
+        )
     }
 
     pub fn reset(&mut self, cv: ChunkVector) {
@@ -96,6 +103,14 @@ impl WorldChunk {
         self.uniform_voxel_id = None;
         self.physics_state = PhysicsState::None;
         self.version = 0;
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.state == ChunkState::Loading
+    }
+
+    pub fn is_meshing(&self) -> bool {
+        self.state == ChunkState::Meshing
     }
 }
 
@@ -320,7 +335,7 @@ impl WorkerPool {
                             let mut world_chunk = chunk_manager.pool.flat[chunk_idx].write();
 
                             if world_chunk.state != ChunkState::None {
-                                if world_chunk.state == ChunkState::MeshReady {
+                                if world_chunk.state == ChunkState::Meshed {
                                     // results.mesh_unload.push(world_chunk.cv);
                                 }
                                 if world_chunk.is_dirty {
@@ -425,7 +440,7 @@ impl WorkerPool {
 
                         for cv in previous_physics_entities.difference(&current_physics_entities) {
                             chunk_manager.write(*cv, |wc| {
-                                if wc.physics_state == PhysicsState::MeshReady {
+                                if wc.physics_state == PhysicsState::Meshed {
                                     results.physics_unload.push(*cv);
                                 }
 
@@ -500,7 +515,7 @@ impl WorkerPool {
 
                             if matches!(
                                 wc.physics_state,
-                                PhysicsState::Meshing | PhysicsState::MeshReady
+                                PhysicsState::Meshing | PhysicsState::Meshed
                             ) {
                                 wc.physics_state = PhysicsState::Meshing;
                                 physics_work_items.push(WorkerTask {
@@ -551,7 +566,7 @@ impl WorkerPool {
                                 if world_chunk.physics_state == PhysicsState::Meshing
                                     && world_chunk.version == version
                                 {
-                                    world_chunk.physics_state = PhysicsState::MeshReady;
+                                    world_chunk.physics_state = PhysicsState::Meshed;
 
                                     results.physics_load.push((cv, mesh));
                                     sx.send(()).ok();
@@ -580,7 +595,7 @@ impl WorkerPool {
                                 if world_chunk.state == ChunkState::Meshing
                                     && world_chunk.version == version
                                 {
-                                    world_chunk.state = ChunkState::MeshReady;
+                                    world_chunk.state = ChunkState::Meshed;
 
                                     results.mesh_load.push((cv, mesh));
                                     sx.send(()).ok();
@@ -605,7 +620,7 @@ impl WorkerPool {
                                 if world_chunk.state == ChunkState::Meshing
                                     && world_chunk.version == version
                                 {
-                                    world_chunk.state = ChunkState::MeshReady;
+                                    world_chunk.state = ChunkState::Meshed;
 
                                     results.mesh_load.push((cv, mesh));
                                     sx.send(()).ok();

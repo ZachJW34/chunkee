@@ -1,0 +1,27 @@
+device=macbook_air_m2 voxel_size=1.0 radius=12 threads=1
+2025-10-03T15:18:10Z INFO  chunkee_core::metrics] [Metrics]
+        (ChunkeeGodot::process) avg=191µs | ema=159µs | max=12.864ms | min=7µs | total=1.555454s | cnt=8107 | rate=5211/s
+        (ChunkeeGodot::render) avg=272µs | ema=555µs | max=12.839ms | min=0ns | total=601.875ms | cnt=2209 | rate=3670/s
+        (ChunkeeCore::RepriortizeQueues) avg=0ns | ema=0ns | max=0ns | min=18446744073709.551615s | total=0ns | cnt=0 | rate=0/s
+        (ChunkeeCore::GridUpdate) avg=4.573ms | ema=4.573ms | max=4.573ms | min=4.573ms | total=4.573ms | cnt=1 | rate=218/s
+        (ChunkeeCore::Load) avg=0ns | ema=0ns | max=44µs | min=0ns | total=2.905ms | cnt=15625 | rate=5378657/s
+        (ChunkeeCore::Generate) avg=1.581ms | ema=168µs | max=4.447ms | min=20µs | total=24.716802s | cnt=15625 | rate=632/s
+        (ChunkeeCore::LoadTask) avg=1.596ms | ema=185µs | max=4.457ms | min=26µs | total=24.949851s | cnt=15625 | rate=626/s
+        (ChunkeeCore::MeshTask) avg=620µs | ema=540µs | max=6.217ms | min=1µs | total=12.033538s | cnt=19390 | rate=1611/s
+        (ChunkeeCore::PhysicsTask) avg=127µs | ema=345µs | max=1.022ms | min=1µs | total=9.277ms | cnt=73 | rate=7868/s
+        (ChunkeeCore::TryRaycast) avg=6µs | ema=5µs | max=49µs | min=2µs | total=51.567ms | cnt=8091 | rate=156902/s
+        (ChunkeeCore::Task) throughput=526/s | active_time=37s | count=19463
+
+device=macbook_air_m2 voxel_size=1.0 radius=12 threads=4
+2025-10-03T15:13:13Z INFO  chunkee_core::metrics] [Metrics]
+        (ChunkeeGodot::process) avg=505µs | ema=132µs | max=12.626ms | min=15µs | total=603.569ms | cnt=1195 | rate=1979/s
+        (ChunkeeGodot::render) avg=812µs | ema=1.758ms | max=12.605ms | min=2µs | total=508.092ms | cnt=625 | rate=1230/s
+        (ChunkeeCore::RepriortizeQueues) avg=0ns | ema=0ns | max=0ns | min=18446744073709.551615s | total=0ns | cnt=0 | rate=0/s
+        (ChunkeeCore::GridUpdate) avg=5.077ms | ema=5.077ms | max=5.077ms | min=5.077ms | total=5.077ms | cnt=1 | rate=196/s
+        (ChunkeeCore::Load) avg=0ns | ema=0ns | max=138µs | min=0ns | total=3.666ms | cnt=15625 | rate=4262138/s
+        (ChunkeeCore::Generate) avg=1.745ms | ema=944µs | max=7.915ms | min=21µs | total=27.270761s | cnt=15625 | rate=572/s
+        (ChunkeeCore::LoadTask) avg=1.761ms | ema=964µs | max=7.93ms | min=28µs | total=27.530185s | cnt=15625 | rate=567/s
+        (ChunkeeCore::MeshTask) avg=724µs | ema=860µs | max=6.171ms | min=1µs | total=14.050872s | cnt=19393 | rate=1380/s
+        (ChunkeeCore::PhysicsTask) avg=577µs | ema=679µs | max=833µs | min=474µs | total=2.309ms | cnt=4 | rate=1732/s
+        (ChunkeeCore::TryRaycast) avg=6µs | ema=5µs | max=26µs | min=2µs | total=8.205ms | cnt=1190 | rate=145033/s
+        (ChunkeeCore::Task) throughput=1871/s | active_time=10.367s | count=19397

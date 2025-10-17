@@ -1,10 +1,12 @@
 mod aabb;
 pub mod block;
 pub mod chunk;
+mod chunk_view;
 pub mod coords;
 pub mod generation;
 pub mod grid;
 pub mod hasher;
+pub mod manager;
 pub mod meshing;
 pub mod metrics;
 pub mod pipeline;

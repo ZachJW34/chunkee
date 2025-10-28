@@ -31,7 +31,7 @@ auto_exposure_speed = 8.4
 auto_exposure_min_sensitivity = 118.5
 auto_exposure_max_sensitivity = 13436.0
 
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_5vw27"]
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_272bh"]
 render_priority = 0
 shader = ExtResource("5_7mycd")
 shader_parameter/texture_array = ExtResource("5_272bh")
@@ -68,7 +68,7 @@ albedo_color = Color(1, 0, 0, 1)
 environment = SubResource("Environment_5vw27")
 camera_attributes = SubResource("CameraAttributesPractical_kek77")
 script = ExtResource("1_h2yge")
-current_time = 13.4006
+current_time = 13.765999244541574
 minutes_per_day = 1217.8
 reflected_energy = 2.0
 auto_exposure_scale = 0.4
@@ -78,7 +78,7 @@ auto_exposure_speed = 8.4
 metadata/_custom_type_script = "uid://cdk4h6kxxjfqt"
 
 [node name="SunLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.938009, -0.34661, 0.629083, -0.269434, 0.72915, -0.777338, -0.218047, 0.590086, -0.34661, 0.72915, 0.590086)
+transform = Transform3D(0, -0.9040128, -0.42750537, 0.64140356, -0.3279837, 0.693562, -0.7672037, -0.27420348, 0.579837, -0.42750522, 0.69356203, 0.5798371)
 shadow_enabled = true
 
 [node name="MoonLight" type="DirectionalLight3D" parent="Sky3D"]
@@ -98,8 +98,8 @@ ground_color = Color(0.3, 0.3, 0.3, 1)
 sky_layers = 4
 sky_render_priority = -128
 horizon_level = 0.0
-sun_altitude = -43.1848
-sun_azimuth = -210.429
+sun_altitude = -46.08724099908239
+sun_azimuth = -216.4007058391849
 sun_disk_color = Color(0.996094, 0.541334, 0.140076, 1)
 sun_disk_intensity = 2.0
 sun_disk_size = 0.015
@@ -107,8 +107,8 @@ sun_light_path = NodePath("../SunLight")
 sun_light_color = Color(1, 1, 1, 1)
 sun_horizon_light_color = Color(0.98, 0.523, 0.294, 1)
 sun_light_energy = 1.0
-moon_altitude = -113.29
-moon_azimuth = -262.128
+moon_altitude = -118.24217216713322
+moon_azimuth = -263.0737789934347
 moon_color = Color(1, 1, 1, 1)
 moon_size = 0.07
 enable_set_moon_texture = false
@@ -116,7 +116,7 @@ moon_resolution = 2
 moon_light_path = NodePath("../MoonLight")
 moon_light_color = Color(0.572549, 0.776471, 0.956863, 1)
 moon_light_energy = 0.3
-deep_space_euler = Vector3(1.29154, 3.14159, 0.756632)
+deep_space_euler = Vector3(1.2915425, 3.1415925, 0.6606966)
 background_color = Color(0.709804, 0.709804, 0.709804, 0.854902)
 set_background_texture = false
 stars_field_color = Color(1, 1, 1, 1)
@@ -183,7 +183,7 @@ script = ExtResource("3_lquwl")
 dome_path = NodePath("../Skydome")
 system_sync = false
 total_cycle_in_minutes = 1217.8
-total_hours = 13.4006
+total_hours = 13.765999244541574
 day = 14
 month = 1
 year = 2025
@@ -195,9 +195,8 @@ longitude = 108.0
 utc = 7.0
 
 [node name="ChunkeeWorldNode" type="ChunkeeWorldNode" parent="."]
-opaque_material = SubResource("ShaderMaterial_5vw27")
+opaque_material = SubResource("ShaderMaterial_272bh")
 translucent_material = SubResource("ShaderMaterial_7mycd")
-voxel_size = null
 
 [node name="CharacterBody3D" type="CharacterBody3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 60, 0)

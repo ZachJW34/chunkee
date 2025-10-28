@@ -15,7 +15,7 @@ impl AABB {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.min.cmpgt(self.max).any()
+        self.min.cmpge(self.max).any()
     }
     /// Calculates the intersection of two AABBs.
     ///
@@ -105,8 +105,52 @@ impl AABB {
     /// 1. `removed`: The volume that is in `self` but not in `other`.
     /// 2. `added`: The volume that is in `other` but not in `self`.
     pub fn difference(&self, other: &Self) -> (Vec<AABB>, Vec<AABB>) {
-        let removed = self.subtract(other);
-        let added = other.subtract(self);
-        (removed, added)
+        let self_minus_other = self.subtract(other);
+        let other_minus_self = other.subtract(self);
+        (self_minus_other, other_minus_self)
+    }
+
+    pub fn iter(&self) -> AABBIter {
+        let is_empty = self.is_empty();
+        AABBIter {
+            min: self.min,
+            max: self.max,
+            current: self.min,
+            done: is_empty, // Start as done if the AABB is empty
+        }
+    }
+}
+
+pub struct AABBIter {
+    min: IVec3,
+    max: IVec3,
+    current: IVec3,
+    done: bool,
+}
+
+impl Iterator for AABBIter {
+    type Item = IVec3;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        let current_pos = self.current;
+
+        self.current.x += 1;
+        if self.current.x >= self.max.x {
+            self.current.x = self.min.x;
+            self.current.y += 1;
+            if self.current.y >= self.max.y {
+                self.current.y = self.min.y;
+                self.current.z += 1;
+                if self.current.z >= self.max.z {
+                    self.done = true;
+                }
+            }
+        }
+
+        Some(current_pos)
     }
 }

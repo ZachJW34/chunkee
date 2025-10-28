@@ -8,7 +8,7 @@ use crate::{
     block::VoxelId,
     coords::{ChunkVector, idx_to_lv, lv_to_idx},
     hasher::VoxelHashMap,
-    pipeline::Deltas,
+    manager::Deltas,
 };
 
 pub type BatchedPersistedChunkMap = VoxelHashMap<Option<PersistedChunk>>;

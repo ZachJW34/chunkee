@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use block_mesh::{
     GreedyQuadsBuffer, MergeVoxel, OrientedBlockFace, RIGHT_HANDED_Y_UP_CONFIG, UnorientedQuad,
@@ -126,8 +126,8 @@ impl<V: ChunkeeVoxel> MergeVoxel for MesherVoxel<V> {
 
 pub fn mesh_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    chunk: Box<Chunk>,
-    neighbors: Box<[Chunk; 6]>,
+    chunk: Arc<Chunk>,
+    neighbors: [Option<Arc<Chunk>>; 6],
     voxel_size: f32,
 ) -> ChunkMeshGroup {
     let padded_side = CHUNK_SIDE_32 + 2;
@@ -178,7 +178,7 @@ fn run_greedy_mesher_generic<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
 
 fn build_padded_buffer<V: ChunkeeVoxel>(
     chunk: Chunk,
-    neighbors: &[Chunk; 6],
+    neighbors: &[Option<Arc<Chunk>>; 6],
     padded_voxels: &mut [VoxelId],
 ) {
     let padded_side = CHUNK_SIDE_32 + 2;
@@ -196,7 +196,7 @@ fn build_padded_buffer<V: ChunkeeVoxel>(
     }
 
     for face in BLOCK_FACES {
-        let neighbor_chunk = neighbors[face as usize];
+        let neighbor_chunk = &neighbors[face as usize];
 
         for i in 0..CHUNK_SIDE_32 {
             for j in 0..CHUNK_SIDE_32 {
@@ -212,7 +212,12 @@ fn build_padded_buffer<V: ChunkeeVoxel>(
                 let neighbor_pos = IVec3::new(n_x, n_y, n_z);
                 let padded_pos = IVec3::new(p_x, p_y, p_z);
 
-                let voxel = neighbor_chunk.get_voxel(neighbor_pos);
+                let voxel = if let Some(c) = neighbor_chunk.as_ref() {
+                    c.get_voxel(neighbor_pos)
+                } else {
+                    VoxelId::AIR
+                };
+
                 padded_voxels[pos_to_idx(padded_pos)] = voxel;
             }
         }
@@ -382,11 +387,13 @@ impl<V: ChunkeeVoxel> MergeVoxel for PhysicsMesherVoxel<V> {
     }
 }
 
+pub type PhysicsMesh = Vec<Vec3>;
+
 pub fn mesh_physics_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    chunk: Box<Chunk>,
+    chunk: Arc<Chunk>,
     voxel_size: f32,
-) -> Vec<Vec3> {
+) -> PhysicsMesh {
     let padded_side = CHUNK_SIDE_32 + 2;
     let padded_volume = padded_side * padded_side * padded_side;
     let mut padded_voxels = vec![VoxelId::AIR; padded_volume as usize];

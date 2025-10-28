@@ -779,16 +779,24 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
             job_queue.queues.is_empty() && active.load(Ordering::Relaxed)
         });
 
+        drop(guard);
+
         if !active.load(Ordering::Relaxed) {
             return;
         }
 
-        while !job_queue.queues.is_empty() && active.load(Ordering::Acquire) {
+        while !job_queue.queues.is_empty() {
+            if !active.load(Ordering::Relaxed) {
+                return;
+            }
+
             if let Some(job) = job_queue.queues.physics.pop() {
                 let mesh = mesh_physics_chunk::<V>(job.cv, job.payload.chunk, config.voxel_size);
                 result_tx
                     .send(WorkerResult::PhysicsMesh(job.cv, job.payload.version, mesh))
                     .ok();
+
+                continue;
             }
 
             if let Some(job) = job_queue.queues.edits.pop() {

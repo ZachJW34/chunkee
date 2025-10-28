@@ -70,7 +70,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
         env_logger::init();
         println!("Initializing ChunkeeWorldNode");
-        let voxel_size = 0.5;
+        let voxel_size = 1.0;
         let config = ChunkeeConfig {
             radius: ChunkRadius(12),
             generator: Box::new(WorldGenerator::new()),

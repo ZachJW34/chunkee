@@ -6,7 +6,6 @@ pub mod generation;
 pub mod hasher;
 pub mod manager;
 pub mod meshing;
-pub mod metrics;
 pub mod storage;
 pub mod streaming;
 mod traversal;

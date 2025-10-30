@@ -2,16 +2,13 @@ mod conversions;
 mod generator;
 mod voxels;
 
-use std::time::Duration;
-
+use crate::{conversions::*, generator::WorldGenerator, voxels::MyVoxels};
 use chunkee_core::{
     coords::ChunkVector,
-    define_metrics,
     glam::{IVec3, Vec3},
     hasher::VoxelHashMap,
     manager::{ChunkeeConfig, ChunkeeManager, Update, VoxelRaycast},
     meshing::{ChunkMeshData, ChunkMeshGroup, PhysicsMesh},
-    metrics::{HistogramMetrics, MetricsPrinter, MetricsRegistry},
     streaming::ChunkRadius,
 };
 use godot::{
@@ -25,19 +22,6 @@ use godot::{
     obj::NewAlloc,
     prelude::*,
 };
-use once_cell::sync::Lazy;
-
-use crate::{conversions::*, generator::WorldGenerator, voxels::MyVoxels};
-
-define_metrics! {
-    enum Histograms {
-        Process => "ChunkeeGodot::process",
-        Render => "ChunkeeGodot::render",
-    }
-}
-
-static CHUNKEE_GODOT_METRICS: Lazy<MetricsRegistry<Histograms, HistogramMetrics>> =
-    Lazy::new(|| MetricsRegistry::new());
 
 struct ChunkeeGodotExtension;
 
@@ -56,7 +40,6 @@ pub struct ChunkeeWorldNode {
     voxel_raycast: VoxelRaycast<MyVoxels>,
     outline_node: Option<Gd<MeshInstance3D>>,
     pub show_physics_debug_mesh: bool,
-    printer: MetricsPrinter,
     #[export]
     pub opaque_material: Option<Gd<ShaderMaterial>>,
     #[export]
@@ -68,7 +51,6 @@ pub struct ChunkeeWorldNode {
 #[godot_api]
 impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
-        env_logger::init();
         println!("Initializing ChunkeeWorldNode");
         let voxel_size = 1.0;
         let config = ChunkeeConfig {
@@ -78,7 +60,6 @@ impl IStaticBody3D for ChunkeeWorldNode {
             thread_count: 4,
         };
         let chunkee_manager: ChunkeeManager<MyVoxels> = ChunkeeManager::new(config);
-        let printer = MetricsPrinter::new(Duration::from_secs(5));
 
         Self {
             base,
@@ -93,11 +74,21 @@ impl IStaticBody3D for ChunkeeWorldNode {
             outline_node: None,
             show_physics_debug_mesh: false,
             voxel_size,
-            printer,
         }
     }
 
     fn ready(&mut self) {
+        #[cfg(feature = "profile")]
+        {
+            use tracing_subscriber::Registry;
+            use tracing_subscriber::prelude::*;
+            use tracing_tracy::TracyLayer;
+
+            let subscriber = Registry::default().with(TracyLayer::default());
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("Failed to set global default subscriber");
+        }
+
         let world = self
             .base()
             .get_world_3d()
@@ -114,11 +105,13 @@ impl IStaticBody3D for ChunkeeWorldNode {
     }
 
     fn process(&mut self, _delta: f64) {
+        #[cfg(feature = "profile")]
+        let _frame_span = tracing::info_span!("frame").entered();
+
         let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) else {
             println!("No camera: noop");
             return;
         };
-        // let process_time = Instant::now();
         let camera_data = camera.to_camera_data();
 
         if Input::singleton().is_action_just_pressed("toggle_debug_physics_mesh") {
@@ -210,6 +203,7 @@ const ARRAY_MAX: usize = 13;
 
 #[godot_api]
 impl ChunkeeWorldNode {
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn render(&mut self) {
         let (Some(opaque_material), Some(translucent_material)) = (
             self.opaque_material.clone(),

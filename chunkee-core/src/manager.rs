@@ -11,6 +11,7 @@ use std::{
 use block_mesh::VoxelVisibility;
 use crossbeam::queue::SegQueue;
 use crossbeam_channel::{Receiver, Sender};
+use fxhash::FxHashMap;
 use glam::{IVec3, Vec3};
 use parking_lot::{Condvar, Mutex};
 
@@ -108,6 +109,10 @@ impl WorldChunk {
         self.physics_state = PhysicsState::None;
         self.version = 0;
     }
+
+    fn clone_chunk(&self) -> Arc<Chunk> {
+        self.chunk.as_ref().unwrap().clone()
+    }
 }
 
 fn floor_div(a: i32, b: i32) -> i32 {
@@ -129,7 +134,7 @@ enum ClipmapUpdate {
 struct ClipMap {
     grid_anchor: IVec3,
     dimensions: IVec3,
-    num_lods: u32,
+    // num_lods: u32,
     snap_distance: i32,
     initialized: bool,
 }
@@ -147,7 +152,7 @@ impl ClipMap {
             grid_anchor: IVec3::MAX,
             dimensions,
             snap_distance,
-            num_lods,
+            // num_lods,
             initialized: false,
         }
     }
@@ -213,7 +218,7 @@ impl ClipMap {
 
 pub struct ChunkManager {
     pool: Vec<WorldChunk>,
-    pub map: HashMap<ChunkVector, WorldChunk>,
+    map: FxHashMap<ChunkVector, WorldChunk>,
 }
 
 impl ChunkManager {
@@ -221,7 +226,7 @@ impl ChunkManager {
         let total_chunks = radius.chunk_count() as usize;
 
         let pool: Vec<WorldChunk> = vec![WorldChunk::default(); total_chunks];
-        let map = HashMap::with_capacity(total_chunks);
+        let map = FxHashMap::with_capacity_and_hasher(total_chunks, Default::default());
 
         Self { pool, map }
     }
@@ -238,6 +243,14 @@ impl ChunkManager {
 
             self.pool.push(world_chunk);
         }
+    }
+
+    fn get(&self, cv: ChunkVector) -> Option<&WorldChunk> {
+        self.map.get(&cv)
+    }
+
+    fn get_mut(&mut self, cv: ChunkVector) -> Option<&mut WorldChunk> {
+        self.map.get_mut(&cv)
     }
 }
 
@@ -477,13 +490,13 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
             let pos = dda.next_voxelpos;
             let cv = wv_to_cv(pos);
 
-            if let Some(world_chunk) = self.chunk_manager.map.get(&cv) {
+            if let Some(world_chunk) = self.chunk_manager.get(cv) {
                 if !world_chunk.is_stable() {
                     return VoxelRaycast::None;
                 }
 
                 let lv = wv_to_lv(pos);
-                let chunk = world_chunk.chunk.as_ref().unwrap();
+                let chunk = world_chunk.clone_chunk();
                 let voxel_id = chunk.get_voxel(lv);
                 let voxel = V::from(voxel_id.type_id());
                 if voxel.visibilty() != VoxelVisibility::Empty {
@@ -497,6 +510,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         VoxelRaycast::Miss
     }
 
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     pub fn update(
         &mut self,
         camera: CameraData,
@@ -545,7 +559,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
 
         for (cv, edits) in voxel_edits.iter_mut() {
-            if let Some(world_chunk) = self.chunk_manager.map.get_mut(cv)
+            if let Some(world_chunk) = self.chunk_manager.get_mut(*cv)
                 && world_chunk.is_stable()
             {
                 for (lv, voxel_id) in edits.drain(..) {
@@ -553,7 +567,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                     let chunk = Arc::make_mut(world_chunk.chunk.as_mut().unwrap());
                     chunk.set_voxel::<V>(lv, voxel_id);
                     let (neighbors_mask, affected_neighbors) =
-                        world_chunk.chunk.as_ref().unwrap().get_voxel_edge_faces(lv);
+                        world_chunk.clone_chunk().get_voxel_edge_faces(lv);
                     if neighbors_mask.count_ones() > 0 {
                         for affected in affected_neighbors {
                             if let Some(face) = affected {
@@ -571,7 +585,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
 
         for (cv, edited) in chunks_to_mesh {
-            if let Some(world_chunk) = self.chunk_manager.map.get_mut(&cv)
+            if let Some(world_chunk) = self.chunk_manager.get_mut(cv)
                 && world_chunk.is_stable()
             {
                 if edited && self.physics_manager.pchunks.contains(&cv) {
@@ -581,7 +595,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                         0,
                         PhysicsPayload {
                             version: world_chunk.version,
-                            chunk: world_chunk.chunk.as_ref().unwrap().clone(),
+                            chunk: world_chunk.clone_chunk().clone(),
                         },
                     ));
                 }
@@ -615,6 +629,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
     }
 
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn update_clipmap(&mut self, camera: &CameraData) {
         let camera_cv = wp_to_cv(camera.pos, self.config.voxel_size);
         if let Some(update) = self.clipmap.update(camera_cv) {
@@ -653,11 +668,12 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
     }
 
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn process_worker_results(&mut self, camera: &CameraData) {
         while let Ok(message) = self.result_rx.try_recv() {
             match message {
                 WorkerResult::Load(cv, chunk, deltas, uniform) => {
-                    if let Some(world_chunk) = self.chunk_manager.map.get_mut(&cv)
+                    if let Some(world_chunk) = self.chunk_manager.get_mut(cv)
                         && world_chunk.state == ChunkState::Loading
                     {
                         world_chunk.chunk = Some(chunk);
@@ -682,7 +698,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                     }
                 }
                 WorkerResult::Mesh(cv, version, mesh_group) => {
-                    if let Some(world_chunk) = self.chunk_manager.map.get_mut(&cv)
+                    if let Some(world_chunk) = self.chunk_manager.get_mut(cv)
                         && world_chunk.version == version
                         && world_chunk.state == ChunkState::Meshing
                     {
@@ -691,7 +707,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                     }
                 }
                 WorkerResult::PhysicsMesh(cv, version, pmesh) => {
-                    if let Some(world_chunk) = self.chunk_manager.map.get_mut(&cv)
+                    if let Some(world_chunk) = self.chunk_manager.get_mut(cv)
                         && world_chunk.version == version
                         && world_chunk.physics_state == PhysicsState::Meshing
                     {
@@ -703,13 +719,14 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
     }
 
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn handle_physics(&mut self, physics_entities: Vec<Vec3>, camera: &CameraData) {
         let stale_pchunks = self
             .physics_manager
             .update(physics_entities, self.config.voxel_size);
 
         for cv in stale_pchunks {
-            if let Some(world_chunk) = self.chunk_manager.map.get_mut(&cv) {
+            if let Some(world_chunk) = self.chunk_manager.get_mut(cv) {
                 if world_chunk.physics_state == PhysicsState::MeshReady {
                     self.updates.push(Update::PhysicsUnload(cv));
                 }
@@ -719,7 +736,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
 
         for cv in &self.physics_manager.pchunks {
-            if let Some(world_chunk) = self.chunk_manager.map.get_mut(cv)
+            if let Some(world_chunk) = self.chunk_manager.get_mut(*cv)
                 && world_chunk.physics_state == PhysicsState::None
                 && world_chunk.is_stable()
             {
@@ -729,7 +746,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                     *cv,
                     priority,
                     PhysicsPayload {
-                        chunk: world_chunk.chunk.as_ref().unwrap().clone(),
+                        chunk: world_chunk.clone_chunk().clone(),
                         version: world_chunk.version,
                     },
                 ));
@@ -737,17 +754,18 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
     }
 
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn meshable(&self, cv: ChunkVector) -> Option<MeshPayload> {
-        if let Some(world_chunk) = self.chunk_manager.map.get(&cv)
+        if let Some(world_chunk) = self.chunk_manager.get(cv)
             && world_chunk.is_stable()
         {
             let neighbor_cvs = neighbors_of(cv);
             let mut neighbors = [const { None }; 6];
 
             for (idx, neighbor_cv) in neighbor_cvs.iter().enumerate() {
-                if let Some(neighbor_chunk) = self.chunk_manager.map.get(&neighbor_cv) {
+                if let Some(neighbor_chunk) = self.chunk_manager.get(*neighbor_cv) {
                     if neighbor_chunk.is_stable() {
-                        neighbors[idx] = Some(neighbor_chunk.chunk.as_ref().unwrap().clone());
+                        neighbors[idx] = Some(neighbor_chunk.clone_chunk());
                     } else {
                         return None;
                     }
@@ -756,7 +774,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
 
             Some(MeshPayload {
                 version: world_chunk.version,
-                chunk: world_chunk.chunk.as_ref().unwrap().clone(),
+                chunk: world_chunk.clone_chunk(),
                 neighbors: neighbors,
             })
         } else {
@@ -784,6 +802,9 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
         if !active.load(Ordering::Relaxed) {
             return;
         }
+
+        #[cfg(feature = "profile")]
+        let _work_span = tracing::info_span!("worker_process_batch").entered();
 
         while !job_queue.queues.is_empty() {
             if !active.load(Ordering::Relaxed) {
@@ -846,6 +867,7 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
     }
 }
 
+#[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 fn load_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
     chunk_store: &ChunkStore,

@@ -124,6 +124,7 @@ impl<V: ChunkeeVoxel> MergeVoxel for MesherVoxel<V> {
     }
 }
 
+#[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 pub fn mesh_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
     chunk: Arc<Chunk>,
@@ -212,7 +213,7 @@ fn build_padded_buffer<V: ChunkeeVoxel>(
                 let neighbor_pos = IVec3::new(n_x, n_y, n_z);
                 let padded_pos = IVec3::new(p_x, p_y, p_z);
 
-                let voxel = if let Some(c) = neighbor_chunk.as_ref() {
+                let voxel = if let Some(c) = neighbor_chunk {
                     c.get_voxel(neighbor_pos)
                 } else {
                     VoxelId::AIR
@@ -286,36 +287,36 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
     }
 }
 
-fn optimize_mesh(mesh_data: &mut ChunkMeshData) {
-    if mesh_data.indices.is_empty() {
-        return;
-    }
+// fn optimize_mesh(mesh_data: &mut ChunkMeshData) {
+//     if mesh_data.indices.is_empty() {
+//         return;
+//     }
 
-    let num_vertices = mesh_data.positions.len();
+//     let num_vertices = mesh_data.positions.len();
 
-    meshopt::optimize_vertex_cache_in_place(&mut mesh_data.indices, num_vertices);
+//     meshopt::optimize_vertex_cache_in_place(&mut mesh_data.indices, num_vertices);
 
-    let positions_adapter = meshopt::VertexDataAdapter::new(
-        bytemuck::cast_slice(&mesh_data.positions),
-        std::mem::size_of::<[f32; 3]>(),
-        0,
-    )
-    .unwrap();
+//     let positions_adapter = meshopt::VertexDataAdapter::new(
+//         bytemuck::cast_slice(&mesh_data.positions),
+//         std::mem::size_of::<[f32; 3]>(),
+//         0,
+//     )
+//     .unwrap();
 
-    meshopt::optimize_overdraw_in_place(&mut mesh_data.indices, &positions_adapter, 1.05);
+//     meshopt::optimize_overdraw_in_place(&mut mesh_data.indices, &positions_adapter, 1.05);
 
-    let remap_table = meshopt::optimize_vertex_fetch_remap(&mesh_data.indices, num_vertices);
+//     let remap_table = meshopt::optimize_vertex_fetch_remap(&mesh_data.indices, num_vertices);
 
-    mesh_data.positions =
-        meshopt::remap_vertex_buffer(&mesh_data.positions, num_vertices, &remap_table);
-    mesh_data.normals =
-        meshopt::remap_vertex_buffer(&mesh_data.normals, num_vertices, &remap_table);
-    mesh_data.uvs = meshopt::remap_vertex_buffer(&mesh_data.uvs, num_vertices, &remap_table);
-    mesh_data.layers = meshopt::remap_vertex_buffer(&mesh_data.layers, num_vertices, &remap_table);
+//     mesh_data.positions =
+//         meshopt::remap_vertex_buffer(&mesh_data.positions, num_vertices, &remap_table);
+//     mesh_data.normals =
+//         meshopt::remap_vertex_buffer(&mesh_data.normals, num_vertices, &remap_table);
+//     mesh_data.uvs = meshopt::remap_vertex_buffer(&mesh_data.uvs, num_vertices, &remap_table);
+//     mesh_data.layers = meshopt::remap_vertex_buffer(&mesh_data.layers, num_vertices, &remap_table);
 
-    mesh_data.indices =
-        meshopt::remap_index_buffer(Some(&mesh_data.indices), num_vertices, &remap_table);
-}
+//     mesh_data.indices =
+//         meshopt::remap_index_buffer(Some(&mesh_data.indices), num_vertices, &remap_table);
+// }
 
 fn process_quad<V: ChunkeeVoxel>(
     mesh_data: &mut ChunkMeshData,
@@ -389,6 +390,7 @@ impl<V: ChunkeeVoxel> MergeVoxel for PhysicsMesherVoxel<V> {
 
 pub type PhysicsMesh = Vec<Vec3>;
 
+#[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 pub fn mesh_physics_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
     chunk: Arc<Chunk>,

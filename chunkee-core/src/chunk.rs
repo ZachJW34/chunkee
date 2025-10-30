@@ -134,11 +134,11 @@ pub fn voxel_solid_value<V: ChunkeeVoxel>(voxel: V) -> u32 {
 
 pub type Chunk32 = Chunk;
 
-pub const CHUNK_SIDE_64: i32 = 64;
-pub const CHUNK_VOLUME_64: usize = (CHUNK_SIDE_64 * CHUNK_SIDE_64 * CHUNK_SIDE_64) as usize;
-type Shape64 = ConstShape3u32<64, 64, 64>;
+// pub const CHUNK_SIDE_64: i32 = 64;
+// pub const CHUNK_VOLUME_64: usize = (CHUNK_SIDE_64 * CHUNK_SIDE_64 * CHUNK_SIDE_64) as usize;
+// type Shape64 = ConstShape3u32<64, 64, 64>;
 
-pub struct Chunk64 {
-    voxels: [VoxelId; CHUNK_VOLUME_64],
-    is_solid: bool,
-}
+// pub struct Chunk64 {
+//     voxels: [VoxelId; CHUNK_VOLUME_64],
+//     is_solid: bool,
+// }

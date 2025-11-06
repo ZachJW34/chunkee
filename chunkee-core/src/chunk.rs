@@ -125,10 +125,10 @@ impl Chunk {
 }
 
 pub fn voxel_solid_value<V: ChunkeeVoxel>(voxel: V) -> u32 {
-    if voxel.visibilty() == VoxelVisibility::Empty {
-        0
-    } else {
+    if voxel.visibilty() == VoxelVisibility::Opaque {
         1
+    } else {
+        0
     }
 }
 

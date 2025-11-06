@@ -54,7 +54,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
         println!("Initializing ChunkeeWorldNode");
         let voxel_size = 1.0;
         let config = ChunkeeConfig {
-            radius: ChunkRadius(12),
+            radius: ChunkRadius(25),
             generator: Box::new(WorldGenerator::new()),
             voxel_size,
             thread_count: 4,
@@ -319,6 +319,75 @@ impl ChunkeeWorldNode {
     }
 }
 
+// #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
+// fn create_render_instance(
+//     scenario: Rid,
+//     rs: &mut RenderingServer,
+//     mesh_data: ChunkMeshData,
+//     material: &Gd<ShaderMaterial>,
+// ) -> (Rid, Rid) {
+//     let array_format = ArrayFormat::VERTEX
+//         | ArrayFormat::NORMAL
+//         | ArrayFormat::TANGENT
+//         | ArrayFormat::TEX_UV
+//         | ArrayFormat::INDEX
+//         | ArrayFormat::CUSTOM0
+//         | ArrayFormat::from_ord(4 << ArrayFormat::CUSTOM0_SHIFT.ord());
+
+//     let indices = PackedInt32Array::from(
+//         mesh_data
+//             .indices
+//             .iter()
+//             .map(|i| *i as i32)
+//             .collect::<Vec<i32>>(),
+//     );
+//     let positions = PackedVector3Array::from(unsafe {
+//         std::slice::from_raw_parts(
+//             mesh_data.positions.as_ptr() as *const Vector3,
+//             mesh_data.positions.len(),
+//         )
+//     });
+//     let normals = PackedVector3Array::from(unsafe {
+//         std::slice::from_raw_parts(
+//             mesh_data.normals.as_ptr() as *const Vector3,
+//             mesh_data.normals.len(),
+//         )
+//     });
+//     let uvs = PackedVector2Array::from(unsafe {
+//         std::slice::from_raw_parts(
+//             mesh_data.uvs.as_ptr() as *const Vector2,
+//             mesh_data.uvs.len(),
+//         )
+//     });
+//     let tangents = PackedFloat32Array::from(bytemuck::cast_slice(&mesh_data.tangents));
+//     let layers = PackedFloat32Array::from(bytemuck::cast_slice(&mesh_data.layers));
+
+//     let mut arrays = VariantArray::new();
+//     arrays.resize(ARRAY_MAX, &Variant::nil());
+
+//     arrays.set(ARRAY_VERTEX, &positions.to_variant());
+//     arrays.set(ARRAY_NORMAL, &normals.to_variant());
+//     arrays.set(ARRAY_TANGENT, &tangents.to_variant());
+//     arrays.set(ARRAY_TEX_UV, &uvs.to_variant());
+//     arrays.set(ARRAY_INDEX, &indices.to_variant());
+//     arrays.set(ARRAY_CUSTOM0, &layers.to_variant());
+
+//     // 2. Create mesh resource on the server
+//     let mesh_rid = rs.mesh_create();
+//     rs.mesh_add_surface_from_arrays_ex(mesh_rid, RenderingServerPrimitiveType::TRIANGLES, &arrays)
+//         .compress_format(array_format)
+//         .done();
+//     rs.mesh_surface_set_material(mesh_rid, 0, material.get_rid());
+
+//     // 3. Create an instance to render the mesh
+//     let instance_rid = rs.instance_create();
+//     rs.instance_set_base(instance_rid, mesh_rid);
+//     rs.instance_set_scenario(instance_rid, scenario);
+
+//     (instance_rid, mesh_rid)
+// }
+
+#[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 fn create_render_instance(
     scenario: Rid,
     rs: &mut RenderingServer,

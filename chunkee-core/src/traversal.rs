@@ -2,9 +2,6 @@
 
 use glam::{BVec3A, IVec3, Vec3A, Vec3Swizzles};
 
-/// The Digital-Differential-Analyzer (DDA) Algorithm for a 3D Grid / Voxels.
-///
-/// ```rust
 /// use glam::Vec3A;
 /// const MAX_STEPS: usize = 128;
 /// let ro = Vec3A::new(0.0, 1.8, 0.0); // origin
@@ -18,7 +15,6 @@ use glam::{BVec3A, IVec3, Vec3A, Vec3Swizzles};
 /// 	// no hit? step the ray
 /// 	dda.step_mut();
 /// }
-/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct DDAState {
     /// The initial position of the ray.

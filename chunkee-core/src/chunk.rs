@@ -3,8 +3,7 @@ use glam::IVec3;
 
 use crate::{
     block::{
-        BlockFace, ChunkeeVoxel, NeighborsMask, Rotation, VoxelId, VoxelVisibility,
-        neighbors_mask_to_faces,
+        BlockFace, ChunkeeVoxel, NeighborsMask, VoxelId, VoxelVisibility, neighbors_mask_to_faces,
     },
     coords::LocalVector,
 };
@@ -16,7 +15,7 @@ type Shape32 = ConstShape3u32<32, 32, 32>;
 #[derive(Debug, Clone, Copy)]
 pub struct Chunk {
     pub(crate) voxels: [VoxelId; CHUNK_VOLUME_32],
-    pub(crate) solid_count: u32,
+    // pub(crate) solid_count: u32,
 }
 
 impl Chunk {
@@ -26,7 +25,14 @@ impl Chunk {
     pub fn new() -> Self {
         Self {
             voxels: [VoxelId::AIR; CHUNK_VOLUME_32],
-            solid_count: 0,
+            // solid_count: 0,
+        }
+    }
+
+    pub fn with_voxel(voxel: VoxelId) -> Self {
+        Self {
+            voxels: [voxel; CHUNK_VOLUME_32],
+            // solid_count: 0,
         }
     }
 
@@ -38,41 +44,37 @@ impl Chunk {
         self.voxels[self.linearize(lv)]
     }
 
-    pub fn set_voxel<V: ChunkeeVoxel>(
-        &mut self,
-        lv: LocalVector,
-        new_voxel_id: VoxelId,
-    ) -> VoxelId {
+    pub fn set_voxel(&mut self, lv: LocalVector, new_voxel_id: VoxelId) -> VoxelId {
         let idx = self.linearize(lv);
-        let new_voxel = new_voxel_id.to_voxel::<V>();
+        // let new_voxel = new_voxel_id.to_voxel::<V>();
         let old_voxel_id = self.voxels[idx];
-        let old_voxel = old_voxel_id.to_voxel::<V>();
+        // let old_voxel = old_voxel_id.to_voxel::<V>();
 
         self.voxels[idx] = new_voxel_id;
-        self.solid_count -= voxel_solid_value::<V>(old_voxel);
-        self.solid_count += voxel_solid_value::<V>(new_voxel);
+        // self.solid_count -= voxel_solid_value::<V>(old_voxel);
+        // self.solid_count += voxel_solid_value::<V>(new_voxel);
 
         old_voxel_id
     }
 
-    pub fn fill<V: ChunkeeVoxel>(&mut self, new_id: VoxelId) {
-        let new_voxel = new_id.to_voxel::<V>();
+    pub fn fill(&mut self, new_id: VoxelId) {
+        // let new_voxel = new_id.to_voxel::<V>();
         self.voxels.fill(new_id);
-        self.solid_count = voxel_solid_value::<V>(new_voxel) * (self.voxels.len() as u32);
+        // self.solid_count = voxel_solid_value::<V>(new_voxel) * (self.voxels.len() as u32);
     }
 
     pub fn set_block<V: ChunkeeVoxel>(&mut self, lv: LocalVector, block: V) -> VoxelId {
-        let new_id = VoxelId::new(block.into(), Rotation::default());
-        self.set_voxel::<V>(lv, new_id)
+        let new_id = VoxelId::new(block.into());
+        self.set_voxel(lv, new_id)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.solid_count == 0
-    }
+    // pub fn is_empty(&self) -> bool {
+    //     self.solid_count == 0
+    // }
 
-    pub fn is_solid(&self) -> bool {
-        self.solid_count as usize == CHUNK_VOLUME_32
-    }
+    // pub fn is_solid(&self) -> bool {
+    //     self.solid_count as usize == CHUNK_VOLUME_32
+    // }
 
     pub fn is_voxel_on_edge(&self, lv: IVec3) -> bool {
         let min = IVec3::ZERO;
@@ -132,7 +134,7 @@ pub fn voxel_solid_value<V: ChunkeeVoxel>(voxel: V) -> u32 {
     }
 }
 
-pub type Chunk32 = Chunk;
+// pub type Chunk32 = Chunk;
 
 // pub const CHUNK_SIDE_64: i32 = 64;
 // pub const CHUNK_VOLUME_64: usize = (CHUNK_SIDE_64 * CHUNK_SIDE_64 * CHUNK_SIDE_64) as usize;

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::HashSet,
     marker::PhantomData,
     sync::{
         Arc,
@@ -17,17 +17,18 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::{
     aabb::AABB,
-    block::{BLOCK_FACES, ChunkeeVoxel, Rotation, VoxelId},
+    block::{BLOCK_FACES, ChunkeeVoxel, VoxelId},
     chunk::{CHUNK_SIDE_32, Chunk},
     coords::{
-        ChunkVector, LocalVector, NEIGHBOR_OFFSETS, WorldVector, cv_to_wv, wp_to_cv, wp_to_wv,
-        wv_to_cv, wv_to_lv,
+        ChunkVector, NEIGHBOR_OFFSETS, WorldVector, cv_to_wv, wp_to_cv, wp_to_wv, wv_to_cv,
+        wv_to_lv,
     },
     generation::VoxelGenerator,
     hasher::VoxelHashMap,
     meshing::{ChunkMeshGroup, PhysicsMesh, mesh_chunk, mesh_physics_chunk},
     storage::{ChunkStore, PersistedChunk},
     streaming::{CameraData, ChunkRadius, compute_priority},
+    sv64::{Interner, SV64Tree},
     traversal::DDAState,
 };
 
@@ -71,7 +72,7 @@ pub type ChunkVersion = u32;
 pub struct WorldChunk {
     pub cv: ChunkVector,
     pub state: ChunkState,
-    pub chunk: Option<Arc<Chunk>>,
+    pub tree: Option<SV64Tree>,
     pub deltas: Deltas,
     pub is_dirty: bool,
     pub version: ChunkVersion,
@@ -84,7 +85,7 @@ impl Default for WorldChunk {
         Self {
             cv: ChunkVector::MAX,
             state: ChunkState::None,
-            chunk: None,
+            tree: None,
             deltas: Deltas::default(),
             is_dirty: false,
             version: 0,
@@ -100,7 +101,7 @@ impl WorldChunk {
     }
 
     pub fn reuse(&mut self, cv: ChunkVector) {
-        self.chunk = None;
+        self.tree = None;
         self.cv = cv;
         self.is_dirty = false;
         self.state = ChunkState::Loading;
@@ -110,8 +111,8 @@ impl WorldChunk {
         self.version = 0;
     }
 
-    fn clone_chunk(&self) -> Arc<Chunk> {
-        self.chunk.as_ref().unwrap().clone()
+    fn clone_tree(&self) -> SV64Tree {
+        self.tree.as_ref().unwrap().clone()
     }
 }
 
@@ -256,20 +257,20 @@ impl ChunkManager {
 
 #[derive(Debug)]
 pub enum WorkerResult {
-    Load(ChunkVector, Arc<Chunk>, Deltas, VoxelUniform),
+    Load(ChunkVector, SV64Tree, Deltas, VoxelUniform),
     Mesh(ChunkVector, ChunkVersion, Box<ChunkMeshGroup>),
     PhysicsMesh(ChunkVector, ChunkVersion, PhysicsMesh),
 }
 
 struct MeshPayload {
     version: ChunkVersion,
-    chunk: Arc<Chunk>,
-    neighbors: [Option<Arc<Chunk>>; 6],
+    tree: SV64Tree,
+    neighbors: [Option<SV64Tree>; 6],
 }
 
 struct PhysicsPayload {
     version: ChunkVersion,
-    chunk: Arc<Chunk>,
+    tree: SV64Tree,
 }
 
 struct WorkerJob<T> {
@@ -313,6 +314,7 @@ impl<T> Ord for WorkerJob<T> {
 struct Queues {
     load: SegQueue<LoadJob>,
     mesh: SegQueue<MeshJob>,
+    intern: SegQueue<(ChunkVector, Box<Chunk>, Deltas, VoxelUniform)>,
     edits: SegQueue<MeshJob>,
     physics: SegQueue<PhysicsJob>,
     saves: SegQueue<SaveJob>,
@@ -323,6 +325,7 @@ impl Queues {
         Self {
             load: SegQueue::new(),
             mesh: SegQueue::new(),
+            intern: SegQueue::new(),
             physics: SegQueue::new(),
             edits: SegQueue::new(),
             saves: SegQueue::new(),
@@ -419,6 +422,7 @@ pub struct ChunkeeManager<V: 'static + ChunkeeVoxel> {
     result_tx: Sender<WorkerResult>,
     result_rx: Receiver<WorkerResult>,
     physics_manager: PhysicsManager,
+    interner: Arc<Mutex<Interner>>,
     _voxel_type: PhantomData<V>,
 }
 
@@ -439,6 +443,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
             result_tx,
             result_rx,
             physics_manager: PhysicsManager::new(),
+            interner: Arc::new(Mutex::new(Interner::new())),
             _voxel_type: PhantomData,
         }
     }
@@ -459,9 +464,10 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
             let result_tx = self.result_tx.clone();
             let active = self.active.clone();
             let chunk_store = self.chunk_store.clone();
+            let interner = self.interner.clone();
             let config = self.config.clone();
             worker_threads.push(thread::spawn(move || {
-                worker_loop::<V>(job_queue, result_tx, active, chunk_store, config)
+                worker_loop::<V>(job_queue, result_tx, active, chunk_store, interner, config)
             }))
         }
 
@@ -501,8 +507,8 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                 }
 
                 let lv = wv_to_lv(pos);
-                let chunk = world_chunk.clone_chunk();
-                let voxel_id = chunk.get_voxel(lv);
+                let tree = world_chunk.tree.as_ref().unwrap();
+                let voxel_id = tree.get_voxel(lv);
                 let voxel = V::from(voxel_id.type_id());
                 if voxel.visibilty() != VoxelVisibility::Empty {
                     return VoxelRaycast::Hit((pos, voxel));
@@ -529,7 +535,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         let significant_drift = self.update_camera(camera);
         self.update_clipmap(&camera);
         self.handle_physics(physics_entities, &camera);
-        self.process_edits(edits);
+        // self.process_edits(edits);
         self.process_worker_results(&camera);
 
         if significant_drift {
@@ -546,83 +552,76 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
     }
 
-    fn process_edits(&mut self, edits: &[(WorldVector, V)]) {
-        let mut voxel_edits: HashMap<ChunkVector, Vec<(LocalVector, VoxelId)>> = HashMap::new();
-        let mut chunks_to_mesh: HashMap<ChunkVector, bool> = HashMap::new();
+    // fn process_edits(&mut self, edits: &[(WorldVector, V)]) {
+    //     let mut voxel_edits: HashMap<ChunkVector, Vec<(LocalVector, VoxelId)>> = HashMap::new();
+    //     let mut chunks_to_mesh: HashMap<ChunkVector, bool> = HashMap::new();
 
-        for (wv, voxel) in edits {
-            let (cv, lv) = (wv_to_cv(*wv), wv_to_lv(*wv));
-            let voxel_id = VoxelId::new((*voxel).into(), Rotation::default());
-            match voxel_edits.entry(cv) {
-                Entry::Occupied(mut occ) => {
-                    occ.get_mut().push((lv, voxel_id));
-                }
-                Entry::Vacant(vac) => {
-                    vac.insert_entry(vec![(lv, voxel_id)]);
-                }
-            }
-        }
+    //     for (wv, voxel) in edits {
+    //         let (cv, lv) = (wv_to_cv(*wv), wv_to_lv(*wv));
+    //         let voxel_id = VoxelId::new((*voxel).into());
+    //         match voxel_edits.entry(cv) {
+    //             Entry::Occupied(mut occ) => {
+    //                 occ.get_mut().push((lv, voxel_id));
+    //             }
+    //             Entry::Vacant(vac) => {
+    //                 vac.insert_entry(vec![(lv, voxel_id)]);
+    //             }
+    //         }
+    //     }
 
-        for (cv, edits) in voxel_edits.iter_mut() {
-            if let Some(world_chunk) = self.chunk_manager.get_mut(*cv)
-                && world_chunk.is_stable()
-            {
-                for (lv, voxel_id) in edits.drain(..) {
-                    let chunk = Arc::make_mut(world_chunk.chunk.as_mut().unwrap());
-                    world_chunk.deltas.0.insert(lv, voxel_id);
-                    chunk.set_voxel::<V>(lv, voxel_id);
-                    let (neighbors_mask, affected_neighbors) =
-                        world_chunk.clone_chunk().get_voxel_edge_faces(lv);
-                    if neighbors_mask.count_ones() > 0 {
-                        for affected in affected_neighbors {
-                            if let Some(face) = affected {
-                                let neighbor_cv = cv + face.into_normal();
-                                chunks_to_mesh.entry(neighbor_cv).or_insert(false);
-                            }
-                        }
-                    }
-                }
+    //     for (cv, edits) in voxel_edits.iter_mut() {
+    //         if let Some(world_chunk) = self.chunk_manager.get_mut(*cv)
+    //             && world_chunk.is_stable()
+    //         {
+    //             for (lv, voxel_id) in edits.drain(..) {
+    //                 let chunk = Arc::make_mut(world_chunk.tree.as_mut().unwrap());
+    //                 world_chunk.deltas.0.insert(lv, voxel_id);
+    //                 chunk.set_voxel(lv, voxel_id);
+    //                 let (neighbors_mask, affected_neighbors) =
+    //                     world_chunk.clone_tree().get_voxel_edge_faces(lv);
+    //                 if neighbors_mask.count_ones() > 0 {
+    //                     for affected in affected_neighbors {
+    //                         if let Some(face) = affected {
+    //                             let neighbor_cv = cv + face.into_normal();
+    //                             chunks_to_mesh.entry(neighbor_cv).or_insert(false);
+    //                         }
+    //                     }
+    //                 }
+    //             }
 
-                world_chunk.is_dirty = true;
-                world_chunk.version = world_chunk.version.wrapping_add(1);
-                chunks_to_mesh.insert(*cv, true);
-            }
-        }
+    //             world_chunk.is_dirty = true;
+    //             world_chunk.version = world_chunk.version.wrapping_add(1);
+    //             chunks_to_mesh.insert(*cv, true);
+    //         }
+    //     }
 
-        for (cv, edited) in chunks_to_mesh {
-            if let Some(world_chunk) = self.chunk_manager.get_mut(cv)
-                && world_chunk.is_stable()
-            {
-                if edited && self.physics_manager.pchunks.contains(&cv) {
-                    world_chunk.physics_state = PhysicsState::Meshing;
-                    self.job_queue.queues.physics.push(PhysicsJob::new(
-                        cv,
-                        0,
-                        PhysicsPayload {
-                            version: world_chunk.version,
-                            chunk: world_chunk.clone_chunk().clone(),
-                        },
-                    ));
-                }
+    //     for (cv, edited) in chunks_to_mesh {
+    //         if let Some(world_chunk) = self.chunk_manager.get_mut(cv)
+    //             && world_chunk.is_stable()
+    //         {
+    //             if edited && self.physics_manager.pchunks.contains(&cv) {
+    //                 world_chunk.physics_state = PhysicsState::Meshing;
+    //                 self.job_queue.queues.physics.push(PhysicsJob::new(
+    //                     cv,
+    //                     0,
+    //                     PhysicsPayload {
+    //                         version: world_chunk.version,
+    //                         chunk: world_chunk.clone_tree().clone(),
+    //                     },
+    //                 ));
+    //             }
 
-                world_chunk.state = ChunkState::Meshing;
+    //             world_chunk.state = ChunkState::Meshing;
 
-                match self.meshable(cv) {
-                    MeshableResult::NotReady => {}
-                    MeshableResult::Obscured => {
-                        let world_chunk = self.chunk_manager.get_mut(cv).unwrap();
-                        world_chunk.state = ChunkState::MeshReady;
-                        self.updates.push(Update::MeshUnload(world_chunk.cv));
-                    }
-                    MeshableResult::Ready(payload) => self
-                        .job_queue
-                        .queues
-                        .edits
-                        .push(MeshJob::new(cv, 0, payload)),
-                }
-            }
-        }
-    }
+    //             if let MeshableResult::Ready(payload) = self.meshable(cv) {
+    //                 self.job_queue
+    //                     .queues
+    //                     .edits
+    //                     .push(MeshJob::new(cv, 0, payload));
+    //             }
+    //         }
+    //     }
+    // }
 
     fn update_camera(&mut self, current: CameraData) -> bool {
         if let Some(previous) = self.camera {
@@ -697,7 +696,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                     if let Some(world_chunk) = self.chunk_manager.get_mut(cv)
                         && world_chunk.state == ChunkState::Loading
                     {
-                        world_chunk.chunk = Some(chunk);
+                        world_chunk.tree = Some(chunk);
                         world_chunk.deltas = deltas;
 
                         match voxel_uniform {
@@ -722,22 +721,13 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                     }
 
                     for cv in meshable_chunk_candidates {
-                        let meshable = self.meshable(cv);
-                        match meshable {
-                            MeshableResult::NotReady => {}
-                            MeshableResult::Obscured => {
-                                let world_chunk = self.chunk_manager.get_mut(cv).unwrap();
-                                world_chunk.state = ChunkState::MeshReady;
-                            }
-                            MeshableResult::Ready(payload) => {
-                                let priority =
-                                    compute_priority(cv, &camera, self.config.voxel_size);
+                        if let MeshableResult::Ready(payload) = self.meshable(cv) {
+                            let priority = compute_priority(cv, &camera, self.config.voxel_size);
 
-                                self.job_queue
-                                    .queues
-                                    .mesh
-                                    .push(MeshJob::new(cv, priority, payload))
-                            }
+                            self.job_queue
+                                .queues
+                                .mesh
+                                .push(MeshJob::new(cv, priority, payload))
                         }
                     }
                 }
@@ -790,7 +780,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                     *cv,
                     priority,
                     PhysicsPayload {
-                        chunk: world_chunk.clone_chunk().clone(),
+                        tree: world_chunk.clone_tree().clone(),
                         version: world_chunk.version,
                     },
                 ));
@@ -805,15 +795,11 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         {
             let neighbor_cvs = neighbors_of(cv);
             let mut neighbors = [const { None }; 6];
-            let mut visible = false;
 
             for (idx, neighbor_cv) in neighbor_cvs.iter().enumerate() {
                 if let Some(neighbor_chunk) = self.chunk_manager.get(*neighbor_cv) {
                     if neighbor_chunk.is_stable() {
-                        let chunk = neighbor_chunk.clone_chunk();
-                        if !chunk.is_solid() {
-                            visible = true
-                        }
+                        let chunk = neighbor_chunk.clone_tree();
                         neighbors[idx] = Some(chunk);
                     } else {
                         return MeshableResult::NotReady;
@@ -821,15 +807,11 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                 }
             }
 
-            if visible {
-                MeshableResult::Ready(MeshPayload {
-                    version: world_chunk.version,
-                    chunk: world_chunk.clone_chunk(),
-                    neighbors: neighbors,
-                })
-            } else {
-                MeshableResult::Obscured
-            }
+            MeshableResult::Ready(MeshPayload {
+                version: world_chunk.version,
+                tree: world_chunk.clone_tree(),
+                neighbors: neighbors,
+            })
         } else {
             MeshableResult::NotReady
         }
@@ -841,6 +823,7 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
     result_tx: Sender<WorkerResult>,
     active: Arc<AtomicBool>,
     chunk_store: Arc<ChunkStore>,
+    interner: Arc<Mutex<Interner>>,
     config: Arc<ChunkeeConfig>,
 ) {
     loop {
@@ -870,7 +853,8 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
             }
 
             if let Some(job) = job_queue.queues.physics.pop() {
-                let mesh = mesh_physics_chunk::<V>(job.cv, job.payload.chunk, config.voxel_size);
+                let chunk = job.payload.tree.to_chunk();
+                let mesh = mesh_physics_chunk::<V>(job.cv, chunk, config.voxel_size);
                 result_tx
                     .send(WorkerResult::PhysicsMesh(job.cv, job.payload.version, mesh))
                     .ok();
@@ -878,13 +862,18 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
                 continue;
             }
 
-            if let Some(job) = job_queue.queues.edits.pop() {
-                let mesh_group = mesh_chunk::<V>(
-                    job.cv,
-                    job.payload.chunk,
-                    job.payload.neighbors,
-                    config.voxel_size,
-                );
+            if let Some(job) = job_queue
+                .queues
+                .edits
+                .pop()
+                .or_else(|| job_queue.queues.mesh.pop())
+            {
+                let chunk = job.payload.tree.to_chunk();
+                let neighbors = job
+                    .payload
+                    .neighbors
+                    .map(|m_tree| m_tree.and_then(|tree| Some(tree.to_chunk())));
+                let mesh_group = mesh_chunk::<V>(job.cv, chunk, neighbors, config.voxel_size);
                 result_tx
                     .send(WorkerResult::Mesh(
                         job.cv,
@@ -896,30 +885,31 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
                 continue;
             }
 
-            if let Some(job) = job_queue.queues.mesh.pop() {
-                let mesh_group = mesh_chunk::<V>(
-                    job.cv,
-                    job.payload.chunk,
-                    job.payload.neighbors,
-                    config.voxel_size,
-                );
-                result_tx
-                    .send(WorkerResult::Mesh(
-                        job.cv,
-                        job.payload.version,
-                        Box::new(mesh_group),
-                    ))
-                    .ok();
+            if !job_queue.queues.intern.is_empty() {
+                if let Some(mut interner) = interner.try_lock() {
+                    while let Some((cv, chunk, deltas, uniform)) = job_queue.queues.intern.pop() {
+                        let tree = SV64Tree::from_chunk(&chunk, &mut interner);
+                        println!("interner len={}", interner.map.len());
 
-                continue;
+                        result_tx
+                            .send(WorkerResult::Load(cv, tree, deltas, uniform))
+                            .ok();
+                    }
+                }
             }
 
             if let Some(job) = job_queue.queues.load.pop() {
+                // TODO: Don't need to create 32x32x32 chunk if uniform
                 let (chunk, deltas, uniform) =
-                    load_chunk::<V>(job.cv, &chunk_store, &config.generator, config.voxel_size);
-                result_tx
-                    .send(WorkerResult::Load(job.cv, Arc::new(chunk), deltas, uniform))
-                    .ok();
+                    load_chunk(job.cv, &chunk_store, &config.generator, config.voxel_size);
+
+                job_queue
+                    .queues
+                    .intern
+                    .push((job.cv, Box::new(chunk), deltas, uniform));
+                // result_tx
+                //     .send(WorkerResult::Load(job.cv, Arc::new(chunk), deltas, uniform))
+                //     .ok();
             }
         }
     }
@@ -928,11 +918,10 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
 enum MeshableResult {
     NotReady,
     Ready(MeshPayload),
-    Obscured,
 }
 
 #[derive(Debug)]
-enum VoxelUniform {
+pub enum VoxelUniform {
     None,
     Loaded(VoxelId),
     Generated(VoxelId),
@@ -945,7 +934,7 @@ impl Default for VoxelUniform {
 }
 
 #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
-fn load_chunk<V: ChunkeeVoxel>(
+fn load_chunk(
     cv: ChunkVector,
     chunk_store: &ChunkStore,
     generator: &Box<dyn VoxelGenerator>,
@@ -964,7 +953,7 @@ fn load_chunk<V: ChunkeeVoxel>(
     }
 
     if let VoxelUniform::Loaded(uniform) = voxel_uniform {
-        chunk.fill::<V>(uniform);
+        chunk.fill(uniform);
     } else {
         generator.apply(cv_to_wv(cv), &mut chunk, voxel_size);
         let first = &chunk.voxels[0];
@@ -973,7 +962,7 @@ fn load_chunk<V: ChunkeeVoxel>(
         }
     }
 
-    merge_deltas::<V>(&mut chunk, &deltas);
+    merge_deltas(&mut chunk, &deltas);
 
     (chunk, deltas, voxel_uniform)
 }
@@ -1016,8 +1005,8 @@ impl PhysicsManager {
     }
 }
 
-pub fn merge_deltas<V: ChunkeeVoxel>(chunk: &mut Chunk, deltas: &Deltas) {
+pub fn merge_deltas(chunk: &mut Chunk, deltas: &Deltas) {
     for (lv, voxel_id) in deltas.0.iter() {
-        chunk.set_voxel::<V>(*lv, *voxel_id);
+        chunk.set_voxel(*lv, *voxel_id);
     }
 }

@@ -8,6 +8,7 @@ pub mod manager;
 pub mod meshing;
 pub mod storage;
 pub mod streaming;
-mod traversal;
+pub mod sv64;
+pub mod traversal;
 pub use block_mesh;
 pub use glam;

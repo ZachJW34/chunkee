@@ -127,15 +127,15 @@ impl<V: ChunkeeVoxel> MergeVoxel for MesherVoxel<V> {
 #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 pub fn mesh_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    chunk: Arc<Chunk>,
-    neighbors: [Option<Arc<Chunk>>; 6],
+    chunk: Chunk,
+    neighbors: [Option<Chunk>; 6],
     voxel_size: f32,
 ) -> ChunkMeshGroup {
     let padded_side = CHUNK_SIDE_32 + 2;
     let padded_volume = padded_side * padded_side * padded_side;
     let mut padded_voxels = vec![VoxelId::AIR; padded_volume as usize];
 
-    build_padded_buffer::<V>(*chunk, &neighbors, &mut padded_voxels);
+    build_padded_buffer::<V>(chunk, &neighbors, &mut padded_voxels);
 
     let mesher_voxels: &[MesherVoxel<V>] = unsafe {
         std::slice::from_raw_parts(
@@ -179,7 +179,7 @@ fn run_greedy_mesher_generic<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
 
 fn build_padded_buffer<V: ChunkeeVoxel>(
     chunk: Chunk,
-    neighbors: &[Option<Arc<Chunk>>; 6],
+    neighbors: &[Option<Chunk>; 6],
     padded_voxels: &mut [VoxelId],
 ) {
     let padded_side = CHUNK_SIDE_32 + 2;
@@ -393,7 +393,7 @@ pub type PhysicsMesh = Vec<Vec3>;
 #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 pub fn mesh_physics_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    chunk: Arc<Chunk>,
+    chunk: Chunk,
     voxel_size: f32,
 ) -> PhysicsMesh {
     let padded_side = CHUNK_SIDE_32 + 2;

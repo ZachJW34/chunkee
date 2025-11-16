@@ -54,7 +54,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
         println!("Initializing ChunkeeWorldNode");
         let voxel_size = 1.0;
         let config = ChunkeeConfig {
-            radius: ChunkRadius(25),
+            radius: ChunkRadius(12),
             generator: Box::new(WorldGenerator::new()),
             voxel_size,
             thread_count: 4,

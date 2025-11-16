@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::voxels::MyVoxels;
 use chunkee_core::{
-    chunk::Chunk32,
+    chunk::Chunk,
     coords::{ChunkVector, LocalVector, WorldVector, cv_to_wv, wv_to_cv},
     generation::VoxelGenerator,
     glam::IVec2,
@@ -152,7 +152,7 @@ impl WorldGenerator {
 }
 
 impl VoxelGenerator for WorldGenerator {
-    fn apply(&self, chunk_start: WorldVector, chunk: &mut Chunk32, voxel_size: f32) {
+    fn apply(&self, chunk_start: WorldVector, chunk: &mut Chunk, voxel_size: f32) {
         let side = 32;
         let column_data = self.get_or_compute_column_data(wv_to_cv(chunk_start), voxel_size);
 

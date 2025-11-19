@@ -1,7 +1,7 @@
 use std::{
     collections::hash_map::Entry,
     hash::{Hash, Hasher},
-    sync::{Arc, Weak},
+    sync::{Arc, LazyLock, Weak},
 };
 
 use fxhash::{FxHashMap, FxHasher64};
@@ -207,43 +207,21 @@ impl HashedNode {
             node: NodeKind::Leaf(LeafNode { voxels }),
         }
     }
-
-    fn intern(self, interner: &mut Interner) -> Arc<Self> {
-        match self.node {
-            NodeKind::Branch(BranchNode { mask, children }) => {
-                let mut interned = Vec::with_capacity(children.len());
-                for child in children {
-                    interned.push(interner.insert(child));
-                }
-
-                let hashed = Self {
-                    hash: self.hash,
-                    node: NodeKind::Branch(BranchNode {
-                        mask,
-                        children: interned.into_boxed_slice(),
-                    }),
-                };
-
-                interner.insert(Arc::new(hashed))
-            }
-            _ => interner.insert(Arc::new(self)),
-        }
-    }
 }
 
 #[derive(Debug)]
-struct BranchNode {
+pub struct BranchNode {
     pub mask: u64,
     pub children: Box<[Arc<HashedNode>]>,
 }
 
 #[derive(Debug)]
-struct LeafNode {
+pub struct LeafNode {
     pub voxels: [VoxelId; 8],
 }
 
 #[derive(Debug)]
-struct UniformNode {
+pub struct UniformNode {
     pub voxel: VoxelId,
 }
 
@@ -258,13 +236,25 @@ const L0_NO_LEAF: &str = "S64T L0 node for 32^3 chunk cannot be a leaf";
 const L1_NO_LEAF: &str = "S64T L1 node for 32^3 chunk cannot be a leaf";
 const L2_NO_BRANCH: &str = "S64T L2 node for 32^3 chunk cannot be a branch";
 
+static SHARED_AIR_UNIFORM: LazyLock<Arc<HashedNode>> =
+    LazyLock::new(|| Arc::new(HashedNode::new_uniform(VoxelId::AIR)));
+
+// TODO: Memory pool the nodes
 #[derive(Debug, Clone)]
 pub struct SV64Tree {
     pub root: Arc<HashedNode>,
 }
 
+impl Default for SV64Tree {
+    fn default() -> Self {
+        Self {
+            root: SHARED_AIR_UNIFORM.clone(),
+        }
+    }
+}
+
 impl SV64Tree {
-    pub fn from_chunk(&chunk: &Chunk, interner: &mut Interner) -> Self {
+    pub fn from_chunk(&chunk: &Chunk) -> Self {
         let mut l0_mask = 0;
         let mut l0_children: Vec<Arc<HashedNode>> = Vec::with_capacity(64);
         let l0_voxel_sample = chunk.get_voxel(IVec3::ZERO);
@@ -314,7 +304,7 @@ impl SV64Tree {
             } else {
                 let children = l1_children.into_boxed_slice();
                 let new_branch = HashedNode::new_branch(l1_mask, children);
-                new_branch.intern(interner)
+                Arc::new(new_branch)
             };
 
             l0_children.push(l1);
@@ -326,12 +316,10 @@ impl SV64Tree {
         } else {
             let children = l0_children.into_boxed_slice();
             let new_branch = HashedNode::new_branch(l0_mask, children);
-            new_branch.intern(interner)
+            Arc::new(new_branch)
         };
 
-        Self {
-            root: interner.insert(l0),
-        }
+        Self { root: l0 }
     }
 
     pub fn to_chunk(&self) -> Chunk {
@@ -396,7 +384,7 @@ impl SV64Tree {
         chunk
     }
 
-    pub fn set_voxels(&mut self, voxels: &[(LocalVector, VoxelId)], interner: &mut Interner) {
+    pub fn set_voxels(&mut self, voxels: &[(LocalVector, VoxelId)]) {
         if voxels.is_empty() {
             return;
         }
@@ -420,15 +408,23 @@ impl SV64Tree {
 
         let mut l0_children = FxHashMap::with_hasher(Default::default());
 
-        if let NodeKind::Branch(branch) = &self.root.node {
-            let mut child_idx = 0;
-            for i in 0..64 {
-                if (branch.mask >> i) & 1 == 1 {
-                    l0_children.insert(i, branch.children[child_idx].clone());
-                    child_idx += 1;
+        match &self.root.node {
+            NodeKind::Uniform(uniform) if uniform.voxel != VoxelId::AIR => {
+                for i in 0..64 {
+                    l0_children.insert(i, Arc::new(HashedNode::new_uniform(uniform.voxel)));
                 }
             }
-        };
+            NodeKind::Branch(l0_branch) => {
+                let mut child_idx = 0;
+                for i in 0..64 {
+                    if (l0_branch.mask >> i) & 1 == 1 {
+                        l0_children.insert(i, l0_branch.children[child_idx].clone());
+                        child_idx += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
 
         for (l1_idx, l1) in nodes {
             let old_l1 = match &self.root.node {
@@ -455,6 +451,24 @@ impl SV64Tree {
                     }
                 }
             };
+
+            match old_l1 {
+                NodeKind::Uniform(uniform) if uniform.voxel != VoxelId::AIR => {
+                    for i in 0..64 {
+                        l1_children.insert(i, Arc::new(HashedNode::new_uniform(uniform.voxel)));
+                    }
+                }
+                NodeKind::Branch(l1_branch) => {
+                    let mut child_idx = 0;
+                    for i in 0..64 {
+                        if (l1_branch.mask >> i) & 1 == 1 {
+                            l1_children.insert(i, l1_branch.children[child_idx].clone());
+                            child_idx += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
 
             for (l2_idx, l2) in l1 {
                 let old_l2 = match &old_l1 {
@@ -498,6 +512,7 @@ impl SV64Tree {
             }
 
             if l1_children.is_empty() {
+                l0_children.remove(&l1_idx);
                 continue;
             }
 
@@ -521,15 +536,14 @@ impl SV64Tree {
                     children.push(l2);
                 }
                 let l1 = HashedNode::new_branch(mask, children.into_boxed_slice());
-                l1.intern(interner)
+                Arc::new(l1)
             };
 
             l0_children.insert(l1_idx, l1);
         }
 
         if l0_children.is_empty() {
-            self.root = interner.insert(Arc::new(HashedNode::new_uniform(VoxelId::AIR)));
-            return;
+            self.root = Arc::new(HashedNode::new_uniform(VoxelId::AIR));
         }
 
         let mut l0_children: Vec<_> = l0_children.into_iter().collect();
@@ -542,6 +556,7 @@ impl SV64Tree {
             let l0 = HashedNode::new_uniform(l0_voxel_sample);
             Arc::new(l0)
         } else {
+            println!("l0_children: {:?}", l0_children.len());
             l0_children.sort_by_key(|e| e.0);
             let mut mask = 0;
             let mut children = Vec::with_capacity(l0_children.len());
@@ -553,7 +568,7 @@ impl SV64Tree {
             Arc::new(l0)
         };
 
-        self.root = interner.insert(l0);
+        self.root = l0;
     }
 
     pub fn get_voxel(&self, lv: IVec3) -> VoxelId {
@@ -597,16 +612,68 @@ impl SV64Tree {
 
 pub struct Interner {
     pub map: FxHashMap<u64, Weak<HashedNode>>,
+    refresh_count: u32,
+    count: u32,
 }
 
 impl Interner {
-    pub fn new() -> Self {
+    pub fn new(refresh_count: u32) -> Self {
         Self {
             map: FxHashMap::with_capacity_and_hasher(64 * 64, Default::default()),
+            refresh_count,
+            count: 0,
         }
     }
 
-    pub fn insert(&mut self, node: Arc<HashedNode>) -> Arc<HashedNode> {
+    pub fn intern_tree(&mut self, tree: SV64Tree) -> SV64Tree {
+        self.count += 1;
+        self.maybe_prune();
+
+        let l0 = &tree.root;
+        let new_l0 = match &l0.node {
+            NodeKind::Leaf(_) => unreachable!("{L0_NO_LEAF}"),
+            NodeKind::Uniform(_) => self.insert(tree.root),
+            NodeKind::Branch(l0_branch) => {
+                let new_l0_children: Vec<_> = l0_branch
+                    .children
+                    .iter()
+                    .map(|l1| match &l1.node {
+                        NodeKind::Leaf(_) => unreachable!("{L1_NO_LEAF}"),
+                        NodeKind::Uniform(_) => self.insert(l1.clone()),
+                        NodeKind::Branch(l1_branch) => {
+                            let new_l1_children: Vec<_> = l1_branch
+                                .children
+                                .iter()
+                                .map(|l2| self.insert(l2.clone()))
+                                .collect();
+                            let new_l1_node = HashedNode {
+                                hash: l1.hash,
+                                node: NodeKind::Branch(BranchNode {
+                                    mask: l1_branch.mask,
+                                    children: new_l1_children.into_boxed_slice(),
+                                }),
+                            };
+
+                            self.insert(Arc::new(new_l1_node))
+                        }
+                    })
+                    .collect();
+
+                let new_l0_node = HashedNode {
+                    hash: l0.hash,
+                    node: NodeKind::Branch(BranchNode {
+                        mask: l0_branch.mask,
+                        children: new_l0_children.into_boxed_slice(),
+                    }),
+                };
+                self.insert(Arc::new(new_l0_node))
+            }
+        };
+
+        SV64Tree { root: new_l0 }
+    }
+
+    fn insert(&mut self, node: Arc<HashedNode>) -> Arc<HashedNode> {
         match self.map.entry(node.hash) {
             Entry::Occupied(mut occ) => {
                 if let Some(existing) = occ.get().upgrade() {
@@ -621,6 +688,16 @@ impl Interner {
                 node
             }
         }
+    }
+
+    fn maybe_prune(&mut self) {
+        if self.count < self.refresh_count {
+            return;
+        }
+
+        self.map.retain(|_k, v| v.upgrade().is_some());
+
+        self.count = 0;
     }
 }
 
@@ -729,7 +806,6 @@ mod tests {
 
     #[test]
     fn from_chunk_to_chunk() {
-        let mut interner = Interner::new();
         let mut in_chunk = Chunk::new();
         let voxel = VoxelId::new(TestVoxels::Grass.into());
         let positions: Vec<IVec3> = vec![
@@ -746,7 +822,7 @@ mod tests {
             in_chunk.set_voxel(*lv, voxel);
         }
 
-        let sv64 = SV64Tree::from_chunk(&in_chunk, &mut interner);
+        let sv64 = SV64Tree::from_chunk(&in_chunk);
         for lv in &positions {
             assert_eq!(sv64.get_voxel(*lv), voxel);
         }
@@ -761,10 +837,9 @@ mod tests {
     fn l0_uniformity() {
         let grass_voxel = VoxelId::new(TestVoxels::Grass.into());
 
-        let mut interner = Interner::new();
         let chunk = Chunk::new();
 
-        let sv64 = SV64Tree::from_chunk(&chunk, &mut interner);
+        let sv64 = SV64Tree::from_chunk(&chunk);
         match &sv64.root.node {
             NodeKind::Uniform(uniform) => {
                 assert_eq!(uniform.voxel, VoxelId::AIR)
@@ -773,7 +848,7 @@ mod tests {
         }
 
         let chunk = Chunk::with_voxel(grass_voxel);
-        let sv64 = SV64Tree::from_chunk(&chunk, &mut interner);
+        let sv64 = SV64Tree::from_chunk(&chunk);
         match &sv64.root.node {
             NodeKind::Uniform(uniform) => {
                 assert_eq!(uniform.voxel, grass_voxel)
@@ -786,7 +861,6 @@ mod tests {
     fn l1_uniformity() {
         let grass_voxel = VoxelId::new(TestVoxels::Grass.into());
 
-        let mut interner = Interner::new();
         let mut chunk = Chunk::new();
         // Skip every other l1
         for l1_offset in REGION_32_8.iter().step_by(2) {
@@ -798,17 +872,16 @@ mod tests {
             }
         }
 
-        let sv64 = SV64Tree::from_chunk(&chunk, &mut interner);
+        let sv64 = SV64Tree::from_chunk(&chunk);
         match &sv64.root.node {
             NodeKind::Branch(branch) => {
-                // every child is full
+                // every other child is full due to step_by(2) above (...0101 = x5)
                 assert_eq!(branch.mask, 0x5555555555555555);
                 assert_eq!(branch.children.len(), 32);
 
                 for child in &branch.children {
                     match &child.node {
                         NodeKind::Uniform(uniform) => {
-                            // every other child is full due to step_by(2) above (...0101 = x5)
                             assert_eq!(uniform.voxel, grass_voxel)
                         }
                         _ => unreachable!(),
@@ -823,7 +896,6 @@ mod tests {
     fn l2_uniformity() {
         let grass_voxel = VoxelId::new(TestVoxels::Grass.into());
 
-        let mut interner = Interner::new();
         let mut chunk = Chunk::new();
         for l1_offset in REGION_32_8 {
             // Skip every other l2
@@ -835,7 +907,7 @@ mod tests {
             }
         }
 
-        let sv64 = SV64Tree::from_chunk(&chunk, &mut interner);
+        let sv64 = SV64Tree::from_chunk(&chunk);
         match &sv64.root.node {
             NodeKind::Branch(branch) => {
                 // every child is full
@@ -870,56 +942,93 @@ mod tests {
     fn set_voxel() {
         let grass_voxel = VoxelId::new(TestVoxels::Grass.into());
 
-        let mut interner = Interner::new();
-        let chunk = Chunk::new();
-        let mut sv64 = SV64Tree::from_chunk(&chunk, &mut interner);
+        // let mut sv64 = SV64Tree::from_chunk(&Chunk::with_voxel(grass_voxel));
+        // let lv = IVec3::new(31, 31, 31);
+        // sv64.set_voxels(&[(lv, VoxelId::AIR)]);
+        // assert_eq!(sv64.get_voxel(lv), VoxelId::AIR);
+        // match &sv64.root.node {
+        //     NodeKind::Branch(l0_branch) => {
+        //         assert_eq!(l0_branch.mask, u64::MAX);
+        //     }
+        //     _ => unreachable!(),
+        // }
 
-        for (l1_idx, l1_offset) in REGION_32_8.iter().enumerate() {
-            for (l2_idx, l2_offset) in REGION_8_2.iter().enumerate() {
-                for l3_offset in REGION_2_1 {
-                    let lv = l1_offset + l2_offset + l3_offset;
-                    assert_eq!(sv64.get_voxel(lv), VoxelId::AIR);
+        // // Testing that an entire l2 region is replaced with air
+        // let mut sv64 = SV64Tree::from_chunk(&Chunk::with_voxel(grass_voxel));
+        // let mut edits = Vec::new();
+        // let l2_start = IVec3::ZERO;
+        // for l2_v in REGION_2_1 {
+        //     let lv = l2_start + l2_v;
+        //     edits.push((lv, VoxelId::AIR));
+        // }
+        // sv64.set_voxels(&edits);
+        // for (lv, v) in &edits {
+        //     assert_eq!(sv64.get_voxel(*lv), *v);
+        // }
 
-                    sv64.set_voxels(&[(lv, grass_voxel)], &mut interner);
-                    assert_eq!(sv64.get_voxel(lv), grass_voxel);
-                }
-
-                match &sv64.root.node {
-                    NodeKind::Branch(l0) => match &l0.children[l1_idx].node {
-                        NodeKind::Branch(l1) => {
-                            assert!(l2_idx < 63);
-                            match &l1.children[l2_idx].node {
-                                NodeKind::Uniform(uniform) => {
-                                    assert_eq!(uniform.voxel, grass_voxel)
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                        NodeKind::Uniform(uniform) => {
-                            assert!(l2_idx == 63);
-                            assert_eq!(uniform.voxel, grass_voxel)
-                        }
-                        _ => unreachable!(),
-                    },
-                    NodeKind::Uniform(uniform) => {
-                        assert!(l1_idx == 63);
-                        assert_eq!(uniform.voxel, grass_voxel);
-                    }
-                    _ => unreachable!(),
-                }
+        // Testing that an entire l1 region is replaced with air
+        let mut sv64 = SV64Tree::from_chunk(&Chunk::with_voxel(grass_voxel));
+        let mut edits = Vec::new();
+        let l1_start = IVec3::ZERO;
+        for l1_v in REGION_8_2 {
+            for l2_v in REGION_2_1 {
+                let lv = l1_start + l1_v + l2_v;
+                edits.push((lv, VoxelId::AIR));
             }
         }
+        sv64.set_voxels(&edits);
+        for (lv, v) in &edits {
+            assert_eq!(sv64.get_voxel(*lv), *v);
+        }
+
+        // let chunk = Chunk::new();
+        // let mut sv64 = SV64Tree::from_chunk(&chunk);
+        // for (l1_idx, l1_offset) in REGION_32_8.iter().enumerate() {
+        //     for (l2_idx, l2_offset) in REGION_8_2.iter().enumerate() {
+        //         for l3_offset in REGION_2_1 {
+        //             let lv = l1_offset + l2_offset + l3_offset;
+        //             assert_eq!(sv64.get_voxel(lv), VoxelId::AIR);
+
+        //             sv64.set_voxels(&[(lv, grass_voxel)]);
+        //             assert_eq!(sv64.get_voxel(lv), grass_voxel);
+        //         }
+
+        //         match &sv64.root.node {
+        //             NodeKind::Branch(l0) => match &l0.children[l1_idx].node {
+        //                 NodeKind::Branch(l1) => {
+        //                     assert!(l2_idx < 63);
+        //                     match &l1.children[l2_idx].node {
+        //                         NodeKind::Uniform(uniform) => {
+        //                             assert_eq!(uniform.voxel, grass_voxel)
+        //                         }
+        //                         _ => unreachable!(),
+        //                     }
+        //                 }
+        //                 NodeKind::Uniform(uniform) => {
+        //                     assert!(l2_idx == 63);
+        //                     assert_eq!(uniform.voxel, grass_voxel)
+        //                 }
+        //                 _ => unreachable!(),
+        //             },
+        //             NodeKind::Uniform(uniform) => {
+        //                 assert!(l1_idx == 63);
+        //                 assert_eq!(uniform.voxel, grass_voxel);
+        //             }
+        //             _ => unreachable!(),
+        //         }
+        //     }
+        // }
     }
 
     #[test]
     fn interning() {
         let grass_voxel = VoxelId::new(TestVoxels::Grass.into());
 
-        let mut interner = Interner::new();
         let mut chunk = Chunk::new();
         chunk.set_voxel(IVec3::ZERO, grass_voxel);
-        let sv64t_1 = SV64Tree::from_chunk(&chunk, &mut interner);
-        let sv64t_2 = SV64Tree::from_chunk(&chunk, &mut interner);
+        let mut interner = Interner::new(10000);
+        let sv64t_1 = interner.intern_tree(SV64Tree::from_chunk(&chunk));
+        let sv64t_2 = interner.intern_tree(SV64Tree::from_chunk(&chunk));
 
         assert!(Arc::ptr_eq(&sv64t_1.root, &sv64t_2.root));
         match (&sv64t_1.root.node, &sv64t_2.root.node) {

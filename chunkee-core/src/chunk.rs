@@ -83,40 +83,6 @@ impl Chunk {
         (lv.cmpeq(min) | lv.cmpeq(max)).any()
     }
 
-    fn get_voxel_edge_faces_mask(&self, lv: IVec3) -> NeighborsMask {
-        let mut mask: NeighborsMask = 0;
-        let max = Self::SIDE - 1;
-
-        if lv.x == 0 {
-            mask |= 1 << (BlockFace::Left as u8);
-        }
-        if lv.x == max {
-            mask |= 1 << (BlockFace::Right as u8);
-        }
-
-        if lv.y == 0 {
-            mask |= 1 << (BlockFace::Bottom as u8);
-        }
-        if lv.y == max {
-            mask |= 1 << (BlockFace::Top as u8);
-        }
-
-        if lv.z == 0 {
-            mask |= 1 << (BlockFace::Front as u8);
-        }
-        if lv.z == max {
-            mask |= 1 << (BlockFace::Back as u8);
-        }
-
-        mask
-    }
-
-    pub fn get_voxel_edge_faces(&self, lv: IVec3) -> (NeighborsMask, [Option<BlockFace>; 6]) {
-        let mask = self.get_voxel_edge_faces_mask(lv);
-
-        (mask, neighbors_mask_to_faces(mask))
-    }
-
     pub fn is_uniform(&self) -> Option<VoxelId> {
         let first = self.voxels[0];
         self.voxels
@@ -132,6 +98,40 @@ pub fn voxel_solid_value<V: ChunkeeVoxel>(voxel: V) -> u32 {
     } else {
         0
     }
+}
+
+fn get_voxel_edge_faces_mask(lv: IVec3) -> NeighborsMask {
+    let mut mask: NeighborsMask = 0;
+    let max = CHUNK_SIDE_32 - 1;
+
+    if lv.x == 0 {
+        mask |= 1 << (BlockFace::Left as u8);
+    }
+    if lv.x == max {
+        mask |= 1 << (BlockFace::Right as u8);
+    }
+
+    if lv.y == 0 {
+        mask |= 1 << (BlockFace::Bottom as u8);
+    }
+    if lv.y == max {
+        mask |= 1 << (BlockFace::Top as u8);
+    }
+
+    if lv.z == 0 {
+        mask |= 1 << (BlockFace::Front as u8);
+    }
+    if lv.z == max {
+        mask |= 1 << (BlockFace::Back as u8);
+    }
+
+    mask
+}
+
+pub fn get_voxel_edge_faces(lv: IVec3) -> (NeighborsMask, [Option<BlockFace>; 6]) {
+    let mask = get_voxel_edge_faces_mask(lv);
+
+    (mask, neighbors_mask_to_faces(mask))
 }
 
 // pub type Chunk32 = Chunk;

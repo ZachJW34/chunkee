@@ -13,7 +13,7 @@ use chunkee_core::{
 };
 use godot::{
     classes::{
-        CollisionShape3D, ConcavePolygonShape3D, IStaticBody3D, Input, MeshInstance3D,
+        CollisionShape3D, ConcavePolygonShape3D, IStaticBody3D, Input, MeshInstance3D, Performance,
         RenderingServer, ShaderMaterial, StandardMaterial3D, StaticBody3D, SurfaceTool,
         base_material_3d::ShadingMode,
         mesh::PrimitiveType as MeshPrimitiveType,
@@ -22,6 +22,11 @@ use godot::{
     obj::NewAlloc,
     prelude::*,
 };
+use tikv_jemalloc_ctl::{epoch, stats};
+
+#[cfg(not(target_family = "windows"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 struct ChunkeeGodotExtension;
 
@@ -54,7 +59,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
         println!("Initializing ChunkeeWorldNode");
         let voxel_size = 1.0;
         let config = ChunkeeConfig {
-            radius: ChunkRadius(12),
+            radius: ChunkRadius(12, 12),
             generator: Box::new(WorldGenerator::new()),
             voxel_size,
             thread_count: 4,
@@ -102,6 +107,8 @@ impl IStaticBody3D for ChunkeeWorldNode {
         self.outline_node = Some(outline);
 
         self.chunkee_manager.start();
+
+        self.monitor_memory();
     }
 
     fn process(&mut self, _delta: f64) {
@@ -123,7 +130,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
 
         let mut edits = Vec::new();
 
-        if Input::singleton().is_action_pressed("break_block")
+        if Input::singleton().is_action_just_pressed("break_block")
             && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
         {
             let radius = 10;
@@ -147,30 +154,37 @@ impl IStaticBody3D for ChunkeeWorldNode {
         if Input::singleton().is_action_just_pressed("add_block")
             && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
         {
-            let radius = 4;
-            let radius_sq = radius * radius;
-            let mut sphere_additions = vec![];
+            // let radius = 4;
+            // let radius_sq = radius * radius;
+            // let mut sphere_additions = vec![];
 
-            for x in -radius..=radius {
-                for y in -radius..=radius {
-                    for z in -radius..=radius {
-                        let offset = IVec3::new(x, y, z);
-                        if offset.length_squared() <= radius_sq {
-                            let wv = hit.0 + offset;
-                            sphere_additions.push((wv, MyVoxels::Stone));
-                        }
-                    }
-                }
-            }
-            edits.extend_from_slice(&sphere_additions);
+            // for x in -radius..=radius {
+            //     for y in -radius..=radius {
+            //         for z in -radius..=radius {
+            //             let offset = IVec3::new(x, y, z);
+            //             if offset.length_squared() <= radius_sq {
+            //                 let wv = hit.0 + offset;
+            //                 sphere_additions.push((wv, MyVoxels::Stone));
+            //             }
+            //         }
+            //     }
+            // }
+            edits.extend_from_slice(&[(hit.0, MyVoxels::Stone)]);
         }
 
         let physics_entities = vec![camera_data.pos];
         self.chunkee_manager
             .update(camera_data, physics_entities, &edits);
-        self.voxel_raycast = self
+        let raycast_res = self
             .chunkee_manager
             .raycast(camera_data.pos, camera_data.forward, 20);
+        // if let (VoxelRaycast::Hit(prev), VoxelRaycast::Hit(cur)) =
+        //     (&self.voxel_raycast, &raycast_res)
+        //     && prev.0 != cur.0
+        // {
+        //     println!("VoxelRaycast={cur:?}");
+        // };
+        self.voxel_raycast = raycast_res;
         self.render();
     }
 
@@ -316,6 +330,50 @@ impl ChunkeeWorldNode {
                 outline_node.set_visible(false);
             }
         }
+    }
+
+    fn monitor_memory(&self) {
+        let mut perf = Performance::singleton();
+
+        let alloc_fn = Callable::from_local_fn("get_rust_alloc", |_| {
+            // Advance epoch (refresh stats)
+            // We accept that we might advance it multiple times per frame if we have multiple monitors.
+            // It is cheap enough for debug tools.
+            let _ = epoch::advance();
+
+            let bytes = stats::allocated::read().unwrap_or(0);
+            let mib = bytes as f64 / 1024.0 / 1024.0;
+            Ok(Variant::from(mib))
+        });
+
+        // --- Monitor 2: Resident (Actual System RAM) ---
+        let res_fn = Callable::from_local_fn("get_rust_res", |_| {
+            let _ = epoch::advance();
+            let bytes = stats::resident::read().unwrap_or(0);
+            let mib = bytes as f64 / 1024.0 / 1024.0;
+            Ok(Variant::from(mib))
+        });
+
+        // --- Monitor 3: Fragmentation % (Optional but cool) ---
+        let frag_fn = Callable::from_local_fn("get_rust_frag", |_| {
+            let _ = epoch::advance();
+            let alloc = stats::allocated::read().unwrap_or(1) as f64; // avoid div by zero
+            let res = stats::resident::read().unwrap_or(0) as f64;
+
+            if res == 0.0 {
+                return Ok(Variant::from(0.0));
+            }
+
+            // Calculate percentage of memory that is overhead
+            let frag_percent = ((res - alloc) / res) * 100.0;
+            Ok(Variant::from(frag_percent))
+        });
+
+        // Register them
+        // Note: Using slashes creates folders in the Debugger UI!
+        perf.add_custom_monitor("Chunkee/Allocated (MiB)", &alloc_fn);
+        perf.add_custom_monitor("Chunkee/Resident (MiB)", &res_fn);
+        perf.add_custom_monitor("Chunkee/Fragmentation (%)", &frag_fn);
     }
 }
 

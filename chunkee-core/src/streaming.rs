@@ -1,4 +1,4 @@
-use glam::{IVec3, Vec3};
+use glam::{IVec3, UVec3, Vec3};
 
 use crate::coords::{CHUNK_SIZE, cv_to_wv, wp_to_cv};
 
@@ -127,14 +127,17 @@ pub fn calc_total_chunks(radius: u32) -> u32 {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ChunkRadius(pub u32);
+pub struct ChunkRadius(pub u32, pub u32);
 
 impl ChunkRadius {
-    pub fn span(&self) -> u32 {
-        self.0 * 2 + 1
+    pub fn span(&self) -> UVec3 {
+        let xz = self.0 * 2 + 1;
+        let y = self.1 * 2 + 1;
+
+        UVec3::new(xz, y, xz)
     }
 
     pub fn chunk_count(&self) -> u32 {
-        self.span().pow(3)
+        self.span().element_product()
     }
 }

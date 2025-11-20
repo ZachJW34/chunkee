@@ -1,6 +1,6 @@
-use glam::{IVec3, Vec3};
+use glam::{IVec3, UVec3, Vec3};
 
-use crate::coords::{CHUNK_SIZE, vec3_wv_to_cv, cv_to_wv};
+use crate::coords::{CHUNK_SIZE, cv_to_wv, wp_to_cv};
 
 // const LOD1_DIST: f32 = 8.0 * CHUNK_SIZE as f32;
 // const LOD2_DIST: f32 = 16.0 * CHUNK_SIZE as f32;
@@ -67,6 +67,7 @@ pub struct Frustum {
 pub struct CameraData {
     pub pos: Vec3,
     pub frustum: Frustum,
+    pub forward: Vec3,
 }
 
 impl Frustum {
@@ -108,8 +109,9 @@ pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3, voxel_size: f32) -> f3
 }
 
 pub fn compute_priority(cv: IVec3, camera_data: &CameraData, voxel_size: f32) -> u32 {
-    let camera_cv = vec3_wv_to_cv(camera_data.pos, voxel_size);
+    let camera_cv = wp_to_cv(camera_data.pos, voxel_size);
     let delta = camera_cv - cv;
+
     if delta.x.abs() <= 2 && delta.y.abs() <= 2 && delta.z.abs() <= 2 {
         return 0;
     }
@@ -122,4 +124,20 @@ pub fn compute_priority(cv: IVec3, camera_data: &CameraData, voxel_size: f32) ->
 
 pub fn calc_total_chunks(radius: u32) -> u32 {
     ((radius * 2) + 1).pow(3)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkRadius(pub u32, pub u32);
+
+impl ChunkRadius {
+    pub fn span(&self) -> UVec3 {
+        let xz = self.0 * 2 + 1;
+        let y = self.1 * 2 + 1;
+
+        UVec3::new(xz, y, xz)
+    }
+
+    pub fn chunk_count(&self) -> u32 {
+        self.span().element_product()
+    }
 }

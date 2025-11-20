@@ -8,15 +8,15 @@ use crate::{
     block::VoxelId,
     coords::{ChunkVector, idx_to_lv, lv_to_idx},
     hasher::VoxelHashMap,
-    pipeline::Deltas,
+    manager::Deltas,
 };
 
 pub type BatchedPersistedChunkMap = VoxelHashMap<Option<PersistedChunk>>;
 
 pub struct ChunkStore {
-    db: sled::Db,
+    // db: sled::Db,
     deltas_tree: sled::Tree,
-    chunk_tree: sled::Tree,
+    // chunk_tree: sled::Tree,
     bincode_config: bincode::config::Configuration<BigEndian>,
 }
 
@@ -29,14 +29,14 @@ impl ChunkStore {
         let deltas_tree = db
             .open_tree("deltas")
             .expect("Failed to create 'deltas' tree");
-        let chunk_tree = db
-            .open_tree("chunk")
-            .expect("Failed to create 'chunk' tree");
+        // let chunk_tree = db
+        //     .open_tree("chunk")
+        //     .expect("Failed to create 'chunk' tree");
 
         ChunkStore {
-            db,
+            // db,
             deltas_tree,
-            chunk_tree,
+            // chunk_tree,
             bincode_config: bincode::config::standard().with_big_endian(),
         }
     }

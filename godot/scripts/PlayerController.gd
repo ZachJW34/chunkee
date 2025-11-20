@@ -21,7 +21,7 @@ extends CharacterBody3D
 @onready var torch_light = $TorchLight
 
 # State variable to track fly mode
-var is_flying: bool = false
+var is_flying: bool = true
 
 
 func _ready() -> void:

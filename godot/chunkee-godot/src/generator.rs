@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::voxels::MyVoxels;
 use chunkee_core::{
-    chunk::Chunk32,
+    chunk::Chunk,
     coords::{ChunkVector, LocalVector, WorldVector, cv_to_wv, wv_to_cv},
     generation::VoxelGenerator,
     glam::IVec2,
@@ -13,11 +13,10 @@ use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 const SEA_LEVEL: f32 = 3.0;
 const BEACH_HEIGHT: f32 = 2.0;
 
-#[derive(Clone)]
 struct ChunkColumnData {
     height_map: [f64; 32 * 32],
     humidity_map: [f64; 32 * 32],
-    biome_map: [f64; 32 * 32],
+    // biome_map: [f64; 32 * 32],
 }
 
 pub struct WorldGenerator {
@@ -28,6 +27,7 @@ pub struct WorldGenerator {
     cave_noise_2: Fbm<Perlin>,
     biome_noise: Fbm<Perlin>,
     dune_noise: Fbm<Perlin>,
+    // TODO: cache management, currently can grow forever. LRU?
     data_cache: DashMap<IVec2, Arc<ChunkColumnData>>,
 }
 
@@ -72,7 +72,7 @@ impl WorldGenerator {
 
         let mut height_map = [0.0; 32 * 32];
         let mut humidity_map = [0.0; 32 * 32];
-        let mut biome_map = [0.0; 32 * 32];
+        // let mut biome_map = [0.0; 32 * 32];
         let chunk_world_pos = cv_to_wv(cv);
 
         const DESERT_TRANSITION_START: f64 = 0.2;
@@ -86,7 +86,7 @@ impl WorldGenerator {
                 let idx = x as usize + z as usize * 32;
 
                 let biome_val = self.biome_noise.get([world_x, world_z]);
-                biome_map[idx] = biome_val;
+                // biome_map[idx] = biome_val;
 
                 // First, calculate the blend factor to see where we are.
                 let blend_factor =
@@ -144,7 +144,7 @@ impl WorldGenerator {
         let data = Arc::new(ChunkColumnData {
             height_map,
             humidity_map,
-            biome_map,
+            // biome_map,
         });
         self.data_cache.insert(column_cv, data.clone());
         data
@@ -152,7 +152,7 @@ impl WorldGenerator {
 }
 
 impl VoxelGenerator for WorldGenerator {
-    fn apply(&self, chunk_start: WorldVector, chunk: &mut Chunk32, voxel_size: f32) {
+    fn apply(&self, chunk_start: WorldVector, chunk: &mut Chunk, voxel_size: f32) {
         let side = 32;
         let column_data = self.get_or_compute_column_data(wv_to_cv(chunk_start), voxel_size);
 

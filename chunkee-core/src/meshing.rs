@@ -124,17 +124,18 @@ impl<V: ChunkeeVoxel> MergeVoxel for MesherVoxel<V> {
     }
 }
 
+#[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 pub fn mesh_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    chunk: Box<Chunk>,
-    neighbors: Box<[Chunk; 6]>,
+    chunk: Chunk,
+    neighbors: [Option<Chunk>; 6],
     voxel_size: f32,
 ) -> ChunkMeshGroup {
     let padded_side = CHUNK_SIDE_32 + 2;
     let padded_volume = padded_side * padded_side * padded_side;
     let mut padded_voxels = vec![VoxelId::AIR; padded_volume as usize];
 
-    build_padded_buffer::<V>(*chunk, &neighbors, &mut padded_voxels);
+    build_padded_buffer::<V>(chunk, &neighbors, &mut padded_voxels);
 
     let mesher_voxels: &[MesherVoxel<V>] = unsafe {
         std::slice::from_raw_parts(
@@ -178,7 +179,7 @@ fn run_greedy_mesher_generic<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
 
 fn build_padded_buffer<V: ChunkeeVoxel>(
     chunk: Chunk,
-    neighbors: &[Chunk; 6],
+    neighbors: &[Option<Chunk>; 6],
     padded_voxels: &mut [VoxelId],
 ) {
     let padded_side = CHUNK_SIDE_32 + 2;
@@ -196,7 +197,7 @@ fn build_padded_buffer<V: ChunkeeVoxel>(
     }
 
     for face in BLOCK_FACES {
-        let neighbor_chunk = neighbors[face as usize];
+        let neighbor_chunk = &neighbors[face as usize];
 
         for i in 0..CHUNK_SIDE_32 {
             for j in 0..CHUNK_SIDE_32 {
@@ -212,7 +213,12 @@ fn build_padded_buffer<V: ChunkeeVoxel>(
                 let neighbor_pos = IVec3::new(n_x, n_y, n_z);
                 let padded_pos = IVec3::new(p_x, p_y, p_z);
 
-                let voxel = neighbor_chunk.get_voxel(neighbor_pos);
+                let voxel = if let Some(c) = neighbor_chunk {
+                    c.get_voxel(neighbor_pos)
+                } else {
+                    VoxelId::AIR
+                };
+
                 padded_voxels[pos_to_idx(padded_pos)] = voxel;
             }
         }
@@ -269,9 +275,10 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
         }
     }
 
-    optimize_mesh(&mut opaque);
+    // Do testing to see if this is needed
+    // optimize_mesh(&mut opaque);
     generate_tangents(&mut opaque);
-    optimize_mesh(&mut translucent);
+    // optimize_mesh(&mut translucent);
     generate_tangents(&mut translucent);
 
     ChunkMeshGroup {
@@ -280,36 +287,36 @@ fn build_mesh_from_quads<V: ChunkeeVoxel, S: ConstShape<3, Coord = u32>>(
     }
 }
 
-fn optimize_mesh(mesh_data: &mut ChunkMeshData) {
-    if mesh_data.indices.is_empty() {
-        return;
-    }
+// fn optimize_mesh(mesh_data: &mut ChunkMeshData) {
+//     if mesh_data.indices.is_empty() {
+//         return;
+//     }
 
-    let num_vertices = mesh_data.positions.len();
+//     let num_vertices = mesh_data.positions.len();
 
-    meshopt::optimize_vertex_cache_in_place(&mut mesh_data.indices, num_vertices);
+//     meshopt::optimize_vertex_cache_in_place(&mut mesh_data.indices, num_vertices);
 
-    let positions_adapter = meshopt::VertexDataAdapter::new(
-        bytemuck::cast_slice(&mesh_data.positions),
-        std::mem::size_of::<[f32; 3]>(),
-        0,
-    )
-    .unwrap();
+//     let positions_adapter = meshopt::VertexDataAdapter::new(
+//         bytemuck::cast_slice(&mesh_data.positions),
+//         std::mem::size_of::<[f32; 3]>(),
+//         0,
+//     )
+//     .unwrap();
 
-    meshopt::optimize_overdraw_in_place(&mut mesh_data.indices, &positions_adapter, 1.05);
+//     meshopt::optimize_overdraw_in_place(&mut mesh_data.indices, &positions_adapter, 1.05);
 
-    let remap_table = meshopt::optimize_vertex_fetch_remap(&mesh_data.indices, num_vertices);
+//     let remap_table = meshopt::optimize_vertex_fetch_remap(&mesh_data.indices, num_vertices);
 
-    mesh_data.positions =
-        meshopt::remap_vertex_buffer(&mesh_data.positions, num_vertices, &remap_table);
-    mesh_data.normals =
-        meshopt::remap_vertex_buffer(&mesh_data.normals, num_vertices, &remap_table);
-    mesh_data.uvs = meshopt::remap_vertex_buffer(&mesh_data.uvs, num_vertices, &remap_table);
-    mesh_data.layers = meshopt::remap_vertex_buffer(&mesh_data.layers, num_vertices, &remap_table);
+//     mesh_data.positions =
+//         meshopt::remap_vertex_buffer(&mesh_data.positions, num_vertices, &remap_table);
+//     mesh_data.normals =
+//         meshopt::remap_vertex_buffer(&mesh_data.normals, num_vertices, &remap_table);
+//     mesh_data.uvs = meshopt::remap_vertex_buffer(&mesh_data.uvs, num_vertices, &remap_table);
+//     mesh_data.layers = meshopt::remap_vertex_buffer(&mesh_data.layers, num_vertices, &remap_table);
 
-    mesh_data.indices =
-        meshopt::remap_index_buffer(Some(&mesh_data.indices), num_vertices, &remap_table);
-}
+//     mesh_data.indices =
+//         meshopt::remap_index_buffer(Some(&mesh_data.indices), num_vertices, &remap_table);
+// }
 
 fn process_quad<V: ChunkeeVoxel>(
     mesh_data: &mut ChunkMeshData,
@@ -381,11 +388,14 @@ impl<V: ChunkeeVoxel> MergeVoxel for PhysicsMesherVoxel<V> {
     }
 }
 
+pub type PhysicsMesh = Vec<Vec3>;
+
+#[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 pub fn mesh_physics_chunk<V: ChunkeeVoxel>(
     cv: ChunkVector,
-    chunk: Box<Chunk>,
+    chunk: Chunk,
     voxel_size: f32,
-) -> Vec<Vec3> {
+) -> PhysicsMesh {
     let padded_side = CHUNK_SIDE_32 + 2;
     let padded_volume = padded_side * padded_side * padded_side;
     let mut padded_voxels = vec![VoxelId::AIR; padded_volume as usize];

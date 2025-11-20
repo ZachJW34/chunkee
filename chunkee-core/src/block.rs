@@ -80,10 +80,9 @@ const _: () = {
 impl VoxelId {
     pub const AIR: Self = Self(0);
 
-    pub fn new(type_id: BlockTypeId, rotation: Rotation) -> Self {
+    pub fn new(type_id: BlockTypeId) -> Self {
         let type_id_part = type_id as u16;
-        let rotation_part = rotation.0 as u16;
-        Self((type_id_part << layout::TYPE_ID_SHIFT) | (rotation_part << layout::ROTATION_SHIFT))
+        Self(type_id_part << layout::TYPE_ID_SHIFT)
     }
 
     #[inline(always)]

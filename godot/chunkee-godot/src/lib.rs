@@ -2,19 +2,18 @@ mod conversions;
 mod generator;
 mod voxels;
 
-use std::time::{Duration, Instant};
-
+use crate::{conversions::*, generator::WorldGenerator, voxels::MyVoxels};
 use chunkee_core::{
-    define_metrics,
+    coords::ChunkVector,
     glam::{IVec3, Vec3},
     hasher::VoxelHashMap,
-    meshing::ChunkMeshData,
-    metrics::Metrics,
-    world::{ChunkeeWorld, ChunkeeWorldConfig, VoxelRaycast},
+    manager::{ChunkeeConfig, ChunkeeManager, Update, VoxelRaycast},
+    meshing::{ChunkMeshData, ChunkMeshGroup, PhysicsMesh},
+    streaming::ChunkRadius,
 };
 use godot::{
     classes::{
-        CollisionShape3D, ConcavePolygonShape3D, IStaticBody3D, Input, MeshInstance3D,
+        CollisionShape3D, ConcavePolygonShape3D, IStaticBody3D, Input, MeshInstance3D, Performance,
         RenderingServer, ShaderMaterial, StandardMaterial3D, StaticBody3D, SurfaceTool,
         base_material_3d::ShadingMode,
         mesh::PrimitiveType as MeshPrimitiveType,
@@ -23,8 +22,11 @@ use godot::{
     obj::NewAlloc,
     prelude::*,
 };
+use tikv_jemalloc_ctl::{epoch, stats};
 
-use crate::{conversions::*, generator::WorldGenerator, voxels::MyVoxels};
+#[cfg(not(target_family = "windows"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 struct ChunkeeGodotExtension;
 
@@ -35,39 +37,38 @@ unsafe impl ExtensionLibrary for ChunkeeGodotExtension {}
 #[class(base=StaticBody3D)]
 pub struct ChunkeeWorldNode {
     base: Base<StaticBody3D>,
-    voxel_world: ChunkeeWorld<MyVoxels>,
+    chunkee_manager: ChunkeeManager<MyVoxels>,
     rendered_chunks: VoxelHashMap<Vec<(Rid, Rid)>>,
     physics_chunks: VoxelHashMap<Gd<CollisionShape3D>>,
     physics_debug_meshes: VoxelHashMap<Gd<MeshInstance3D>>,
     world_scenario: Rid,
     voxel_raycast: VoxelRaycast<MyVoxels>,
     outline_node: Option<Gd<MeshInstance3D>>,
-    metrics: Metrics<ChunkeeWorldNodeMetrics>,
     pub show_physics_debug_mesh: bool,
     #[export]
     pub opaque_material: Option<Gd<ShaderMaterial>>,
     #[export]
     pub translucent_material: Option<Gd<ShaderMaterial>>,
-    #[export]
+    // #[export]
     pub voxel_size: f32,
 }
 
 #[godot_api]
 impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
-        env_logger::init();
         println!("Initializing ChunkeeWorldNode");
-        let voxel_size = 0.5;
-        let config = ChunkeeWorldConfig {
-            radius: 12,
+        let voxel_size = 1.0;
+        let config = ChunkeeConfig {
+            radius: ChunkRadius(12, 12),
             generator: Box::new(WorldGenerator::new()),
             voxel_size,
+            thread_count: 4,
         };
-        let voxel_world: ChunkeeWorld<MyVoxels> = ChunkeeWorld::new(config);
+        let chunkee_manager: ChunkeeManager<MyVoxels> = ChunkeeManager::new(config);
 
         Self {
             base,
-            voxel_world,
+            chunkee_manager,
             world_scenario: Rid::Invalid,
             rendered_chunks: Default::default(),
             physics_chunks: Default::default(),
@@ -77,12 +78,22 @@ impl IStaticBody3D for ChunkeeWorldNode {
             voxel_raycast: VoxelRaycast::None,
             outline_node: None,
             show_physics_debug_mesh: false,
-            metrics: Metrics::new(Duration::from_secs(2)),
             voxel_size,
         }
     }
 
     fn ready(&mut self) {
+        #[cfg(feature = "profile")]
+        {
+            use tracing_subscriber::Registry;
+            use tracing_subscriber::prelude::*;
+            use tracing_tracy::TracyLayer;
+
+            let subscriber = Registry::default().with(TracyLayer::default());
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("Failed to set global default subscriber");
+        }
+
         let world = self
             .base()
             .get_world_3d()
@@ -95,99 +106,88 @@ impl IStaticBody3D for ChunkeeWorldNode {
         self.base_mut().add_child(&outline);
         self.outline_node = Some(outline);
 
-        self.voxel_world.enable_pipeline();
+        self.chunkee_manager.start();
+
+        self.monitor_memory();
     }
 
     fn process(&mut self, _delta: f64) {
-        if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
-            let process_time = Instant::now();
-            let camera_pos = Vec3::from_array(camera.get_global_position().to_array());
-            self.voxel_world.update(camera.to_camera_data());
-            let input = Input::singleton();
+        #[cfg(feature = "profile")]
+        let _frame_span = tracing::info_span!("frame").entered();
 
-            if input.is_action_just_pressed("toggle_debug_physics_mesh") {
-                self.show_physics_debug_mesh = !self.show_physics_debug_mesh;
-                for (_, mesh) in self.physics_debug_meshes.iter_mut() {
-                    mesh.set_visible(self.show_physics_debug_mesh)
-                }
+        let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) else {
+            println!("No camera: noop");
+            return;
+        };
+        let camera_data = camera.to_camera_data();
+
+        if Input::singleton().is_action_just_pressed("toggle_debug_physics_mesh") {
+            self.show_physics_debug_mesh = !self.show_physics_debug_mesh;
+            for (_, mesh) in self.physics_debug_meshes.iter_mut() {
+                mesh.set_visible(self.show_physics_debug_mesh)
             }
+        }
 
-            let forward_direction = -camera.get_global_transform().basis.col_c();
-            let raycast_time = Instant::now();
-            self.voxel_raycast =
-                self.voxel_world
-                    .try_raycast(camera_pos, forward_direction.as_vec3(), 100);
-            self.metrics
-                .get_mut(ChunkeeWorldNodeMetrics::Raycast)
-                .record(raycast_time.elapsed());
+        let mut edits = Vec::new();
 
-            if input.is_action_pressed("break_block")
-                && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
-            {
-                let radius = 10;
-                let radius_sq = radius * radius;
-                let mut sphere_removals = vec![];
+        if Input::singleton().is_action_just_pressed("break_block")
+            && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
+        {
+            let radius = 10;
+            let radius_sq = radius * radius;
+            let mut sphere_removals = vec![];
 
-                for x in -radius..=radius {
-                    for y in -radius..=radius {
-                        for z in -radius..=radius {
-                            let offset = IVec3::new(x, y, z);
-                            if offset.length_squared() <= radius_sq {
-                                let wv = hit.0 + offset;
-                                sphere_removals.push((wv, MyVoxels::Air));
-                            }
+            for x in -radius..=radius {
+                for y in -radius..=radius {
+                    for z in -radius..=radius {
+                        let offset = IVec3::new(x, y, z);
+                        if offset.length_squared() <= radius_sq {
+                            let wv = hit.0 + offset;
+                            sphere_removals.push((wv, MyVoxels::Air));
                         }
                     }
                 }
-                self.voxel_world.set_voxels_at(&sphere_removals);
             }
-
-            if input.is_action_just_pressed("add_block")
-                && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
-            {
-                let radius = 10;
-                let radius_sq = radius * radius;
-                let mut sphere_removals = vec![];
-
-                for x in -radius..=radius {
-                    for y in -radius..=radius {
-                        for z in -radius..=radius {
-                            let offset = IVec3::new(x, y, z);
-                            if offset.length_squared() <= radius_sq {
-                                let wv = hit.0 + offset;
-                                sphere_removals.push((wv, MyVoxels::Stone));
-                            }
-                        }
-                    }
-                }
-                self.voxel_world.set_voxels_at(&sphere_removals);
-            }
-
-            self.render();
-
-            self.metrics
-                .get_mut(ChunkeeWorldNodeMetrics::Process)
-                .record(process_time.elapsed());
-            self.metrics.batch_print();
-        } else {
-            println!("Cannot update without camera")
+            edits.extend_from_slice(&sphere_removals);
         }
+
+        if Input::singleton().is_action_just_pressed("add_block")
+            && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
+        {
+            // let radius = 4;
+            // let radius_sq = radius * radius;
+            // let mut sphere_additions = vec![];
+
+            // for x in -radius..=radius {
+            //     for y in -radius..=radius {
+            //         for z in -radius..=radius {
+            //             let offset = IVec3::new(x, y, z);
+            //             if offset.length_squared() <= radius_sq {
+            //                 let wv = hit.0 + offset;
+            //                 sphere_additions.push((wv, MyVoxels::Stone));
+            //             }
+            //         }
+            //     }
+            // }
+            edits.extend_from_slice(&[(hit.0, MyVoxels::Stone)]);
+        }
+
+        let physics_entities = vec![camera_data.pos];
+        self.chunkee_manager
+            .update(camera_data, physics_entities, &edits);
+        let raycast_res = self
+            .chunkee_manager
+            .raycast(camera_data.pos, camera_data.forward, 20);
+        // if let (VoxelRaycast::Hit(prev), VoxelRaycast::Hit(cur)) =
+        //     (&self.voxel_raycast, &raycast_res)
+        //     && prev.0 != cur.0
+        // {
+        //     println!("VoxelRaycast={cur:?}");
+        // };
+        self.voxel_raycast = raycast_res;
+        self.render();
     }
 
-    fn physics_process(&mut self, _delta: f64) {
-        if let Some(camera) = self.base().get_viewport().and_then(|vp| vp.get_camera_3d()) {
-            let camera_pos = Vec3::from_array(camera.get_global_position().to_array());
-
-            let mut entities = Vec::new();
-            entities.push(chunkee_core::pipeline::PhysicsEntity {
-                id: camera.instance_id().to_i64(),
-                pos: camera_pos,
-            });
-
-            self.voxel_world.update_physics_entities(entities);
-            self.process_physics_meshes();
-        }
-    }
     fn exit_tree(&mut self) {
         godot_print!("Exiting tree, cleaning up all rendering server RIDs.");
         let mut rs = RenderingServer::singleton();
@@ -215,144 +215,243 @@ const ARRAY_CUSTOM0: usize = 6;
 const ARRAY_INDEX: usize = 12;
 const ARRAY_MAX: usize = 13;
 
-define_metrics! {
-    enum ChunkeeWorldNodeMetrics {
-        Process => "ChunkeeWorldNode::process",
-        Render => "ChunkeeWorldNode::render",
-        Raycast => "ChunkeeWorld::try_raycast"
-    }
-}
-
 #[godot_api]
 impl ChunkeeWorldNode {
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn render(&mut self) {
-        let mesh_render_time = Instant::now();
+        let (Some(opaque_material), Some(translucent_material)) = (
+            self.opaque_material.clone(),
+            self.translucent_material.clone(),
+        ) else {
+            return;
+        };
+
         let mut rs = RenderingServer::singleton();
 
-        let drain_limit = 100;
-
-        self.rendered_chunks.retain(|cv, rids| {
-            if !self.voxel_world.chunk_in_range(*cv) {
-                for (instance_rid, mesh_rid) in rids {
-                    rs.free_rid(*instance_rid);
-                    rs.free_rid(*mesh_rid);
-                }
-
-                return false;
+        while let Some(update) = self.chunkee_manager.updates.pop() {
+            match update {
+                Update::Mesh(cv, chunk_mesh_group) => self.render_mesh_group(
+                    &mut rs,
+                    cv,
+                    chunk_mesh_group,
+                    &opaque_material,
+                    &translucent_material,
+                ),
+                Update::MeshUnload(cv) => self.remove_mesh_group(cv, &mut rs),
+                Update::Physics(cv, pmesh) => self.render_physics_mesh(cv, pmesh),
+                Update::PhysicsUnload(cv) => self.remove_physics_mesh(cv),
             }
+        }
 
-            true
-        });
+        self.render_raycast_outline();
+    }
 
-        if let (Some(opaque_material), Some(translucent_material)) =
-            (&self.opaque_material, &self.translucent_material)
-        {
-            let mesh_queue_len = self.voxel_world.results.mesh_load.len();
+    fn render_mesh_group(
+        &mut self,
+        rs: &mut RenderingServer,
+        cv: ChunkVector,
+        mesh_group: Box<ChunkMeshGroup>,
+        opaque_material: &Gd<ShaderMaterial>,
+        translucent_material: &Gd<ShaderMaterial>,
+    ) {
+        self.remove_mesh_group(cv, rs);
 
-            for _ in 0..drain_limit {
-                let Some((cv, mesh_group)) = self.voxel_world.results.mesh_load.pop() else {
-                    break;
-                };
+        let mut new_rids = Vec::new();
+        if !mesh_group.opaque.positions.is_empty() {
+            let (instance_rid, mesh_rid) =
+                create_render_instance(self.world_scenario, rs, mesh_group.opaque, opaque_material);
+            new_rids.push((instance_rid, mesh_rid));
+        }
 
-                if let Some(old_rids) = self.rendered_chunks.remove(&cv) {
-                    for (instance_rid, mesh_rid) in old_rids {
-                        rs.free_rid(instance_rid);
-                        rs.free_rid(mesh_rid);
-                    }
-                }
+        if !mesh_group.translucent.positions.is_empty() {
+            let (instance_rid, mesh_rid) = create_render_instance(
+                self.world_scenario,
+                rs,
+                mesh_group.translucent,
+                translucent_material,
+            );
+            new_rids.push((instance_rid, mesh_rid));
+        }
 
-                let mut new_rids = Vec::new();
-                if !mesh_group.opaque.positions.is_empty() {
-                    let (instance_rid, mesh_rid) = create_render_instance(
-                        self.world_scenario,
-                        mesh_group.opaque,
-                        opaque_material,
-                    );
-                    new_rids.push((instance_rid, mesh_rid));
-                }
+        if !new_rids.is_empty() {
+            self.rendered_chunks.insert(cv, new_rids);
+        }
+    }
 
-                if !mesh_group.translucent.positions.is_empty() {
-                    let (instance_rid, mesh_rid) = create_render_instance(
-                        self.world_scenario,
-                        mesh_group.translucent,
-                        translucent_material,
-                    );
-                    new_rids.push((instance_rid, mesh_rid));
-                }
-
-                if !new_rids.is_empty() {
-                    self.rendered_chunks.insert(cv, new_rids);
-                }
-            }
-
-            if let Some(outline_node) = self.outline_node.as_mut() {
-                if let VoxelRaycast::Hit((wv, _)) = self.voxel_raycast {
-                    let scaled_wv =
-                        Vector3::new(wv.x as f32, wv.y as f32, wv.z as f32) * self.voxel_size;
-                    outline_node.set_position(scaled_wv.to_godot());
-                    outline_node.set_visible(true);
-                } else {
-                    outline_node.set_visible(false);
-                }
-            }
-
-            if mesh_queue_len > 0 {
-                self.metrics
-                    .get_mut(ChunkeeWorldNodeMetrics::Render)
-                    .record(mesh_render_time.elapsed());
+    fn remove_mesh_group(&mut self, cv: ChunkVector, rs: &mut RenderingServer) {
+        if let Some(old_rids) = self.rendered_chunks.remove(&cv) {
+            for (instance_rid, mesh_rid) in old_rids {
+                rs.free_rid(instance_rid);
+                rs.free_rid(mesh_rid);
             }
         }
     }
 
-    fn process_physics_meshes(&mut self) {
-        if let Some((cv, triangles)) = self.voxel_world.results.physics_load.pop() {
-            if triangles.is_empty() {
-                if let Some(mut old_debug_mesh) = self.physics_debug_meshes.remove(&cv) {
-                    old_debug_mesh.queue_free();
-                }
+    fn render_physics_mesh(&mut self, cv: ChunkVector, pmesh: PhysicsMesh) {
+        self.remove_physics_mesh(cv);
 
-                if let Some(mut old_col) = self.physics_chunks.remove(&cv) {
-                    old_col.queue_free();
-                }
+        if pmesh.is_empty() {
+            return;
+        }
+
+        let collision_shape_node = create_physics_mesh(&pmesh);
+        self.base_mut().add_child(&collision_shape_node);
+        if let Some(mut old_col) = self.physics_chunks.insert(cv, collision_shape_node) {
+            old_col.queue_free();
+        }
+
+        let mut debug_mesh_instance = create_physics_debug_mesh(&pmesh);
+        debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
+        self.base_mut().add_child(&debug_mesh_instance);
+        if let Some(mut old_debug_mesh) = self.physics_debug_meshes.insert(cv, debug_mesh_instance)
+        {
+            old_debug_mesh.queue_free();
+        }
+    }
+
+    fn remove_physics_mesh(&mut self, cv: ChunkVector) {
+        if let Some(mut old_debug_mesh) = self.physics_debug_meshes.remove(&cv) {
+            old_debug_mesh.queue_free();
+        }
+
+        if let Some(mut old_col) = self.physics_chunks.remove(&cv) {
+            old_col.queue_free();
+        }
+    }
+
+    fn render_raycast_outline(&mut self) {
+        if let Some(outline_node) = self.outline_node.as_mut() {
+            if let VoxelRaycast::Hit((wv, _)) = self.voxel_raycast {
+                let scaled_wv =
+                    Vector3::new(wv.x as f32, wv.y as f32, wv.z as f32) * self.voxel_size;
+                outline_node.set_position(scaled_wv.to_godot());
+                outline_node.set_visible(true);
             } else {
-                // --- Debug Visualization Mesh ---
-                let mut debug_mesh_instance = create_physics_debug_mesh(triangles.clone());
-                debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
-                self.base_mut().add_child(&debug_mesh_instance);
-                if let Some(mut old_debug_mesh) =
-                    self.physics_debug_meshes.insert(cv, debug_mesh_instance)
-                {
-                    old_debug_mesh.queue_free();
-                }
-                // ---------------------------------------
-
-                let collision_shape_node = create_physics_mesh(triangles);
-                self.base_mut().add_child(&collision_shape_node);
-                if let Some(mut old_col) = self.physics_chunks.insert(cv, collision_shape_node) {
-                    old_col.queue_free();
-                }
+                outline_node.set_visible(false);
             }
         }
+    }
 
-        if let Some(cv) = self.voxel_world.results.physics_unload.pop() {
-            if let Some(mut shape_to_remove) = self.physics_chunks.remove(&cv) {
-                shape_to_remove.queue_free();
+    fn monitor_memory(&self) {
+        let mut perf = Performance::singleton();
+
+        let alloc_fn = Callable::from_local_fn("get_rust_alloc", |_| {
+            // Advance epoch (refresh stats)
+            // We accept that we might advance it multiple times per frame if we have multiple monitors.
+            // It is cheap enough for debug tools.
+            let _ = epoch::advance();
+
+            let bytes = stats::allocated::read().unwrap_or(0);
+            let mib = bytes as f64 / 1024.0 / 1024.0;
+            Ok(Variant::from(mib))
+        });
+
+        // --- Monitor 2: Resident (Actual System RAM) ---
+        let res_fn = Callable::from_local_fn("get_rust_res", |_| {
+            let _ = epoch::advance();
+            let bytes = stats::resident::read().unwrap_or(0);
+            let mib = bytes as f64 / 1024.0 / 1024.0;
+            Ok(Variant::from(mib))
+        });
+
+        // --- Monitor 3: Fragmentation % (Optional but cool) ---
+        let frag_fn = Callable::from_local_fn("get_rust_frag", |_| {
+            let _ = epoch::advance();
+            let alloc = stats::allocated::read().unwrap_or(1) as f64; // avoid div by zero
+            let res = stats::resident::read().unwrap_or(0) as f64;
+
+            if res == 0.0 {
+                return Ok(Variant::from(0.0));
             }
 
-            if let Some(mut debug_mesh_to_remove) = self.physics_debug_meshes.remove(&cv) {
-                debug_mesh_to_remove.queue_free();
-            }
-        }
+            // Calculate percentage of memory that is overhead
+            let frag_percent = ((res - alloc) / res) * 100.0;
+            Ok(Variant::from(frag_percent))
+        });
+
+        // Register them
+        // Note: Using slashes creates folders in the Debugger UI!
+        perf.add_custom_monitor("Chunkee/Allocated (MiB)", &alloc_fn);
+        perf.add_custom_monitor("Chunkee/Resident (MiB)", &res_fn);
+        perf.add_custom_monitor("Chunkee/Fragmentation (%)", &frag_fn);
     }
 }
 
+// #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
+// fn create_render_instance(
+//     scenario: Rid,
+//     rs: &mut RenderingServer,
+//     mesh_data: ChunkMeshData,
+//     material: &Gd<ShaderMaterial>,
+// ) -> (Rid, Rid) {
+//     let array_format = ArrayFormat::VERTEX
+//         | ArrayFormat::NORMAL
+//         | ArrayFormat::TANGENT
+//         | ArrayFormat::TEX_UV
+//         | ArrayFormat::INDEX
+//         | ArrayFormat::CUSTOM0
+//         | ArrayFormat::from_ord(4 << ArrayFormat::CUSTOM0_SHIFT.ord());
+
+//     let indices = PackedInt32Array::from(
+//         mesh_data
+//             .indices
+//             .iter()
+//             .map(|i| *i as i32)
+//             .collect::<Vec<i32>>(),
+//     );
+//     let positions = PackedVector3Array::from(unsafe {
+//         std::slice::from_raw_parts(
+//             mesh_data.positions.as_ptr() as *const Vector3,
+//             mesh_data.positions.len(),
+//         )
+//     });
+//     let normals = PackedVector3Array::from(unsafe {
+//         std::slice::from_raw_parts(
+//             mesh_data.normals.as_ptr() as *const Vector3,
+//             mesh_data.normals.len(),
+//         )
+//     });
+//     let uvs = PackedVector2Array::from(unsafe {
+//         std::slice::from_raw_parts(
+//             mesh_data.uvs.as_ptr() as *const Vector2,
+//             mesh_data.uvs.len(),
+//         )
+//     });
+//     let tangents = PackedFloat32Array::from(bytemuck::cast_slice(&mesh_data.tangents));
+//     let layers = PackedFloat32Array::from(bytemuck::cast_slice(&mesh_data.layers));
+
+//     let mut arrays = VariantArray::new();
+//     arrays.resize(ARRAY_MAX, &Variant::nil());
+
+//     arrays.set(ARRAY_VERTEX, &positions.to_variant());
+//     arrays.set(ARRAY_NORMAL, &normals.to_variant());
+//     arrays.set(ARRAY_TANGENT, &tangents.to_variant());
+//     arrays.set(ARRAY_TEX_UV, &uvs.to_variant());
+//     arrays.set(ARRAY_INDEX, &indices.to_variant());
+//     arrays.set(ARRAY_CUSTOM0, &layers.to_variant());
+
+//     // 2. Create mesh resource on the server
+//     let mesh_rid = rs.mesh_create();
+//     rs.mesh_add_surface_from_arrays_ex(mesh_rid, RenderingServerPrimitiveType::TRIANGLES, &arrays)
+//         .compress_format(array_format)
+//         .done();
+//     rs.mesh_surface_set_material(mesh_rid, 0, material.get_rid());
+
+//     // 3. Create an instance to render the mesh
+//     let instance_rid = rs.instance_create();
+//     rs.instance_set_base(instance_rid, mesh_rid);
+//     rs.instance_set_scenario(instance_rid, scenario);
+
+//     (instance_rid, mesh_rid)
+// }
+
+#[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 fn create_render_instance(
     scenario: Rid,
+    rs: &mut RenderingServer,
     mesh_data: ChunkMeshData,
     material: &Gd<ShaderMaterial>,
 ) -> (Rid, Rid) {
-    let mut rs = RenderingServer::singleton();
-
     let array_format = ArrayFormat::VERTEX
         | ArrayFormat::NORMAL
         | ArrayFormat::TANGENT
@@ -459,9 +558,9 @@ fn create_voxel_outline(voxel_size: f32) -> Gd<MeshInstance3D> {
     mesh_instance
 }
 
-fn create_physics_mesh(triangles: Vec<Vec3>) -> Gd<CollisionShape3D> {
+fn create_physics_mesh(pmesh: &Vec<Vec3>) -> Gd<CollisionShape3D> {
     let faces = PackedVector3Array::from_iter(
-        triangles
+        pmesh
             .into_iter()
             .map(|tri| Vector3::from_array(tri.to_array())),
     );
@@ -475,12 +574,12 @@ fn create_physics_mesh(triangles: Vec<Vec3>) -> Gd<CollisionShape3D> {
     shape_node
 }
 
-fn create_physics_debug_mesh(triangles: Vec<Vec3>) -> Gd<MeshInstance3D> {
+fn create_physics_debug_mesh(pmesh: &Vec<Vec3>) -> Gd<MeshInstance3D> {
     let mut st = SurfaceTool::new_gd();
 
     st.begin(MeshPrimitiveType::LINES);
 
-    for triangle in triangles.chunks_exact(3) {
+    for triangle in pmesh.chunks_exact(3) {
         let p0 = Vector3::from_array(triangle[0].to_array());
         let p1 = Vector3::from_array(triangle[1].to_array());
         let p2 = Vector3::from_array(triangle[2].to_array());

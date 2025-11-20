@@ -34,7 +34,12 @@ impl ToCameraData for Gd<Camera3D> {
         });
 
         let frustum = Frustum { planes };
+        let forward = -self.get_global_transform().basis.col_c().as_vec3();
 
-        CameraData { pos, frustum }
+        CameraData {
+            pos,
+            frustum,
+            forward,
+        }
     }
 }

@@ -59,7 +59,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
         println!("Initializing ChunkeeWorldNode");
         let voxel_size = 1.0;
         let config = ChunkeeConfig {
-            radius: ChunkRadius(12, 12),
+            radius: ChunkRadius(24, 8),
             generator: Box::new(WorldGenerator::new()),
             voxel_size,
             thread_count: 4,
@@ -130,7 +130,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
 
         let mut edits = Vec::new();
 
-        if Input::singleton().is_action_just_pressed("break_block")
+        if Input::singleton().is_action_pressed("break_block")
             && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
         {
             let radius = 10;
@@ -154,22 +154,22 @@ impl IStaticBody3D for ChunkeeWorldNode {
         if Input::singleton().is_action_just_pressed("add_block")
             && let VoxelRaycast::Hit(hit) = &self.voxel_raycast
         {
-            // let radius = 4;
-            // let radius_sq = radius * radius;
-            // let mut sphere_additions = vec![];
+            let radius = 4;
+            let radius_sq = radius * radius;
+            let mut sphere_additions = vec![];
 
-            // for x in -radius..=radius {
-            //     for y in -radius..=radius {
-            //         for z in -radius..=radius {
-            //             let offset = IVec3::new(x, y, z);
-            //             if offset.length_squared() <= radius_sq {
-            //                 let wv = hit.0 + offset;
-            //                 sphere_additions.push((wv, MyVoxels::Stone));
-            //             }
-            //         }
-            //     }
-            // }
-            edits.extend_from_slice(&[(hit.0, MyVoxels::Stone)]);
+            for x in -radius..=radius {
+                for y in -radius..=radius {
+                    for z in -radius..=radius {
+                        let offset = IVec3::new(x, y, z);
+                        if offset.length_squared() <= radius_sq {
+                            let wv = hit.0 + offset;
+                            sphere_additions.push((wv, MyVoxels::Stone));
+                        }
+                    }
+                }
+            }
+            edits.extend_from_slice(&sphere_additions);
         }
 
         let physics_entities = vec![camera_data.pos];

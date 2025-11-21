@@ -556,7 +556,6 @@ impl SV64Tree {
             let l0 = HashedNode::new_uniform(l0_voxel_sample);
             Arc::new(l0)
         } else {
-            println!("l0_children: {:?}", l0_children.len());
             l0_children.sort_by_key(|e| e.0);
             let mut mask = 0;
             let mut children = Vec::with_capacity(l0_children.len());

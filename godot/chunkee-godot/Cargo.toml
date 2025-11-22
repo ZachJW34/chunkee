@@ -15,8 +15,16 @@ tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.20", optional = true }
 tracing-tracy = { version = "0.11.4", optional = true }
 bytemuck = "1.24.0"
+
+[target.'cfg(not(target_family = "windows"))'.dependencies]
 tikv-jemallocator = "0.6.1"
-tikv-jemalloc-ctl = {version="0.6.1", features = ['stats']}
+tikv-jemalloc-ctl = { version = "0.6.1", features = ['stats'] }
 
 [features]
-profile = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy", "tracing-tracy/enable", "chunkee-core/profile"]
+profile = [
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:tracing-tracy",
+    "tracing-tracy/enable",
+    "chunkee-core/profile",
+]

@@ -22,7 +22,6 @@ use godot::{
     obj::NewAlloc,
     prelude::*,
 };
-use tikv_jemalloc_ctl::{epoch, stats};
 
 #[cfg(not(target_family = "windows"))]
 #[global_allocator]
@@ -108,6 +107,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
 
         self.chunkee_manager.start();
 
+        #[cfg(not(target_family = "windows"))]
         self.monitor_memory();
     }
 
@@ -332,7 +332,10 @@ impl ChunkeeWorldNode {
         }
     }
 
+    #[cfg(not(target_family = "windows"))]
     fn monitor_memory(&self) {
+        use tikv_jemalloc_ctl::{epoch, stats};
+
         let mut perf = Performance::singleton();
 
         let alloc_fn = Callable::from_local_fn("get_rust_alloc", |_| {

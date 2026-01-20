@@ -1,42 +1,9 @@
-use glam::{IVec3, UVec3, Vec3};
+use glam::Vec3;
 
-use crate::coords::{CHUNK_SIZE, cv_to_wv, wp_to_cv};
-
-// const LOD1_DIST: f32 = 8.0 * CHUNK_SIZE as f32;
-// const LOD2_DIST: f32 = 16.0 * CHUNK_SIZE as f32;
-// const LOD3_DIST: f32 = 64.0 * CHUNK_SIZE as f32;
-
-// const LOD1_DIST_SQ: f32 = LOD1_DIST * LOD1_DIST; // e.g., 128*128 = 16384
-// const LOD2_DIST_SQ: f32 = LOD2_DIST * LOD2_DIST; // e.g., 256*256 = 65536
-// const LOD3_DIST_SQ: f32 = LOD3_DIST * LOD3_DIST; // e.g., 256*256 = 65536
-
-// pub fn calc_lod(cv: ChunkVector, camera_pos: Vec3) -> LOD {
-//     let distance_sq = cv_camera_distance_sq(cv, camera_pos);
-
-//     if distance_sq < LOD1_DIST_SQ {
-//         1
-//     } else if distance_sq < LOD2_DIST_SQ {
-//         2
-//     } else {
-//         3
-//     }
-// }
-
-// pub fn calc_lod(cv: ChunkVector, camera_pos: Vec3) -> u8 {
-// let distance_sq = cv_camera_distance_sq(cv, camera_pos);
-
-// if distance_sq < LOD1_DIST_SQ {
-//     1
-// } else if distance_sq < LOD2_DIST_SQ {
-//     2
-// } else if distance_sq < LOD3_DIST_SQ {
-//     3
-// } else {
-//     4
-// }
-//
-// 1
-// }
+use crate::{
+    clipmap::ChunkKey,
+    coords::{CHUNK_SIZE, wv_to_wp},
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Plane {
@@ -71,25 +38,21 @@ pub struct CameraData {
 }
 
 impl Frustum {
-    // TODO: Investigate frustum check when moving backwards, something is off
-    pub fn is_chunk_in_frustum(&self, cv: IVec3, voxel_size: f32) -> bool {
-        let min_corner = cv_to_wv(cv).as_vec3() * voxel_size;
-        let max_corner = min_corner + Vec3::splat(CHUNK_SIZE as f32 * voxel_size);
-
+    pub fn is_chunk_in_frustum(&self, min_corner: Vec3, chunk_world_size: f32) -> bool {
         for plane in &self.planes {
             let p_vertex = Vec3::new(
                 if plane.normal.x > 0.0 {
-                    max_corner.x
+                    min_corner.x + chunk_world_size
                 } else {
                     min_corner.x
                 },
                 if plane.normal.y > 0.0 {
-                    max_corner.y
+                    min_corner.y + chunk_world_size
                 } else {
                     min_corner.y
                 },
                 if plane.normal.z > 0.0 {
-                    max_corner.z
+                    min_corner.z + chunk_world_size
                 } else {
                     min_corner.z
                 },
@@ -99,45 +62,34 @@ impl Frustum {
                 return false;
             }
         }
-
         true
     }
 }
 
-pub fn cv_camera_distance_sq(cv: IVec3, camera_pos: Vec3, voxel_size: f32) -> f32 {
-    (cv_to_wv(cv).as_vec3() * voxel_size).distance_squared(camera_pos)
-}
+pub fn compute_priority(key: ChunkKey, camera_data: &CameraData, voxel_size: f32) -> u32 {
+    let wp = wv_to_wp(key.to_wv(), voxel_size);
 
-pub fn compute_priority(cv: IVec3, camera_data: &CameraData, voxel_size: f32) -> u32 {
-    let camera_cv = wp_to_cv(camera_data.pos, voxel_size);
-    let delta = camera_cv - cv;
+    let chunk_world_size = (CHUNK_SIZE as f32) * (key.lod_scale() as f32) * voxel_size;
 
-    if delta.x.abs() <= 2 && delta.y.abs() <= 2 && delta.z.abs() <= 2 {
+    let delta = camera_data.pos - wp;
+    let safety_margin = chunk_world_size * 1.5;
+
+    if delta.x.abs() <= safety_margin
+        && delta.y.abs() <= safety_margin
+        && delta.z.abs() <= safety_margin
+    {
         return 0;
     }
 
-    let distance_sq = cv.distance_squared(camera_cv);
-    let not_in_frustum = !camera_data.frustum.is_chunk_in_frustum(cv, voxel_size);
+    let not_in_frustum = !camera_data
+        .frustum
+        .is_chunk_in_frustum(wp, chunk_world_size);
 
-    (distance_sq as u32) + (not_in_frustum as u32) * 100000
+    let distance_sq = wp.distance_squared(camera_data.pos);
+
+    (distance_sq as u32) + (not_in_frustum as u32) * 1000000
 }
 
 pub fn calc_total_chunks(radius: u32) -> u32 {
     ((radius * 2) + 1).pow(3)
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ChunkRadius(pub u32, pub u32);
-
-impl ChunkRadius {
-    pub fn span(&self) -> UVec3 {
-        let xz = self.0 * 2 + 1;
-        let y = self.1 * 2 + 1;
-
-        UVec3::new(xz, y, xz)
-    }
-
-    pub fn chunk_count(&self) -> u32 {
-        self.span().element_product()
-    }
 }

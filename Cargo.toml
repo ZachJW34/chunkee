@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["chunkee-core", "godot/chunkee-godot"]
+members = ["chunkee-core", "chunkee-godot"]
 
 [profile.dev]
 opt-level = 3

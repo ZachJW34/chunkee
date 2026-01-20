@@ -68,7 +68,7 @@ albedo_color = Color(1, 0, 0, 1)
 environment = SubResource("Environment_5vw27")
 camera_attributes = SubResource("CameraAttributesPractical_kek77")
 script = ExtResource("1_h2yge")
-current_time = 14.255901297424314
+current_time = 11.803697487272094
 minutes_per_day = 1217.8
 reflected_energy = 2.0
 auto_exposure_scale = 0.4
@@ -78,7 +78,7 @@ auto_exposure_speed = 8.4
 metadata/_custom_type_script = "uid://cdk4h6kxxjfqt"
 
 [node name="SunLight" type="DirectionalLight3D" parent="Sky3D"]
-transform = Transform3D(0, -0.848187, -0.52969694, 0.66359127, -0.3962638, 0.63452476, -0.74809533, -0.35150227, 0.5628495, -0.52969676, 0.6345248, 0.5628496)
+transform = Transform3D(0, -0.99943113, 0.033725947, 0.6088782, 0.026753573, 0.79281247, -0.7932638, 0.020534994, 0.6085318, 0.03372604, 0.79281247, 0.6085318)
 shadow_enabled = true
 
 [node name="MoonLight" type="DirectionalLight3D" parent="Sky3D"]
@@ -98,8 +98,8 @@ ground_color = Color(0.3, 0.3, 0.3, 1)
 sky_layers = 4
 sky_render_priority = -128
 horizon_level = 0.0
-sun_altitude = -50.61522953094384
-sun_azimuth = -223.26182210419287
+sun_altitude = -37.550860331065806
+sun_azimuth = -176.8277236085689
 sun_disk_color = Color(0.996094, 0.541334, 0.140076, 1)
 sun_disk_intensity = 2.0
 sun_disk_size = 0.015
@@ -107,8 +107,8 @@ sun_light_path = NodePath("../SunLight")
 sun_light_color = Color(1, 1, 1, 1)
 sun_horizon_light_color = Color(0.98, 0.523, 0.294, 1)
 sun_light_energy = 1.0
-moon_altitude = -124.89207166229595
-moon_azimuth = -264.29384202421716
+moon_altitude = -91.78891098941642
+moon_azimuth = -257.3976185868833
 moon_color = Color(1, 1, 1, 1)
 moon_size = 0.07
 enable_set_moon_texture = false
@@ -116,7 +116,7 @@ moon_resolution = 2
 moon_light_path = NodePath("../MoonLight")
 moon_light_color = Color(0.572549, 0.776471, 0.956863, 1)
 moon_light_energy = 0.3
-deep_space_euler = Vector3(1.291543, -3.1415925, 0.53208953)
+deep_space_euler = Vector3(1.291543, -3.1415925, 1.175833)
 background_color = Color(0.709804, 0.709804, 0.709804, 0.854902)
 set_background_texture = false
 stars_field_color = Color(1, 1, 1, 1)
@@ -183,7 +183,7 @@ script = ExtResource("3_lquwl")
 dome_path = NodePath("../Skydome")
 system_sync = false
 total_cycle_in_minutes = 1217.8
-total_hours = 14.255901297424314
+total_hours = 11.803697487272094
 day = 14
 month = 1
 year = 2025
@@ -203,7 +203,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 60, 0)
 safe_margin = 0.1
 script = ExtResource("1_7mycd")
 jump_velocity = 14.0
-fly_speed = 100.0
+fly_speed = 20.0
 
 [node name="Camera3D" type="Camera3D" parent="CharacterBody3D"]
 current = true

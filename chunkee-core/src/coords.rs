@@ -2,35 +2,17 @@ use glam::{IVec3, Vec3};
 
 // pub const WORLD_CHUNK_HEIGHT: i32 = 128;
 pub const CHUNK_SIZE: i32 = 32;
+pub const CHUNK_SIZE_F32: f32 = CHUNK_SIZE as f32;
 pub const CHUNK_VOLUME: i32 = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 const CHUNK_SIZE_VEC: IVec3 = IVec3::splat(CHUNK_SIZE);
 
-pub type WorldVector = IVec3;
-pub type ChunkVector = IVec3;
-pub type LocalVector = IVec3;
-
 #[inline(always)]
-pub fn wv_to_cv(wv: WorldVector) -> ChunkVector {
-    wv.div_euclid(CHUNK_SIZE_VEC)
-}
-
-#[inline(always)]
-pub fn cv_to_wv(cv: ChunkVector) -> WorldVector {
-    cv * CHUNK_SIZE_VEC
-}
-
-#[inline(always)]
-pub fn wv_to_lv(wv: WorldVector) -> LocalVector {
+pub fn wv_to_lv(wv: IVec3) -> IVec3 {
     wv.rem_euclid(CHUNK_SIZE_VEC)
 }
 
 #[inline(always)]
-pub fn cv_lv_to_wv(cv: ChunkVector, lv: LocalVector) -> WorldVector {
-    (cv * CHUNK_SIZE_VEC) + lv
-}
-
-#[inline(always)]
-pub fn lv_to_idx(lv: LocalVector) -> usize {
+pub fn lv_to_idx(lv: IVec3) -> usize {
     (lv.x + lv.y * CHUNK_SIZE + lv.z * CHUNK_SIZE * CHUNK_SIZE) as usize
 }
 
@@ -50,8 +32,8 @@ pub fn wp_to_wv(wp: Vec3, voxel_size: f32) -> IVec3 {
 }
 
 #[inline(always)]
-pub fn wp_to_cv(wp: Vec3, voxel_size: f32) -> ChunkVector {
-    wv_to_cv(wp_to_wv(wp, voxel_size))
+pub fn wv_to_wp(wv: IVec3, voxel_size: f32) -> Vec3 {
+    wv.as_vec3() * voxel_size
 }
 
 pub const NEIGHBOR_OFFSETS: [IVec3; 27] = [

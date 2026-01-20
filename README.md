@@ -35,19 +35,14 @@ The project is structured as a Cargo workspace and is made up of two main compon
 ## Improvements
 
 - Project:
-
   - Move example Godot project out of chunkee-godot and into separate folder
   - Make chunkee-godot agnostic
 
-- Storage:
-
-  - Run Length Encoding (RLE)?
-  - Allow storing of all procedurally generated content?
-
 - Meshing:
-
-  - Seams when a chunk LOD changes and its neighbors haven't been updated yet (jarring)
+  - Faster meshing crate: https://crates.io/crates/binary-greedy-meshing
 
 - Generation:
-
   - Come up with system for placing entities across chunk boundaries (trees, buildings etc..)
+
+- Rendering
+  - Move mesh packing to ChunkeeManager worker thread

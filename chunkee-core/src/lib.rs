@@ -1,9 +1,9 @@
 mod aabb;
 pub mod block;
 pub mod chunk;
+pub mod clipmap;
 pub mod coords;
 pub mod generation;
-pub mod hasher;
 pub mod manager;
 pub mod meshing;
 pub mod storage;

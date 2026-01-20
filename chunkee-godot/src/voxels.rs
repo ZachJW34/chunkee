@@ -82,6 +82,13 @@ impl Block for MyVoxels {
             _ => VoxelCollision::Solid,
         }
     }
+
+    fn should_render_face(&self, face: chunkee_core::block::BlockFace) -> bool {
+        match self {
+            MyVoxels::Water => face == chunkee_core::block::BlockFace::Top,
+            _ => true,
+        }
+    }
 }
 
 impl ChunkeeVoxel for MyVoxels {}

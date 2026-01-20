@@ -7,7 +7,7 @@ use std::{
 use fxhash::{FxHashMap, FxHasher64};
 use glam::IVec3;
 
-use crate::{block::VoxelId, chunk::Chunk, coords::LocalVector};
+use crate::{block::VoxelId, chunk::Chunk};
 
 pub const REGION_32_8: [IVec3; 64] = [
     IVec3::new(0, 0, 0),
@@ -274,7 +274,7 @@ impl SV64Tree {
                     let lv: IVec3 = l2_v + REGION_2_1[i];
                     let voxel = chunk.get_voxel(lv);
                     l2_uniform &= l2_voxel_sample == voxel;
-                    chunk.get_voxel(lv)
+                    voxel
                 });
 
                 l1_uniform &= l2_uniform && l1_voxel_sample == l2_voxel_sample;
@@ -384,7 +384,7 @@ impl SV64Tree {
         chunk
     }
 
-    pub fn set_voxels(&mut self, voxels: &[(LocalVector, VoxelId)]) {
+    pub fn set_voxels(&mut self, voxels: &[(IVec3, VoxelId)]) {
         if voxels.is_empty() {
             return;
         }
@@ -607,6 +607,13 @@ impl SV64Tree {
             NodeKind::Leaf(leaf) => leaf.voxels[l2_idx as usize],
         }
     }
+
+    pub fn is_air(&self) -> bool {
+        match &self.root.node {
+            NodeKind::Uniform(uniform_node) => uniform_node.voxel == VoxelId::AIR,
+            _ => false,
+        }
+    }
 }
 
 pub struct Interner {
@@ -738,7 +745,7 @@ mod tests {
 
     use crate::{
         block::{Block, BlockTypeId, ChunkeeVoxel, TextureMapping, VoxelCollision},
-        chunk::CHUNK_VOLUME_32,
+        coords::CHUNK_VOLUME,
     };
 
     use super::*;
@@ -827,7 +834,7 @@ mod tests {
         }
 
         let out_chunk = sv64.to_chunk();
-        for idx in 0..CHUNK_VOLUME_32 {
+        for idx in 0..(CHUNK_VOLUME as usize) {
             assert_eq!(&in_chunk.voxels[idx], &out_chunk.voxels[idx])
         }
     }

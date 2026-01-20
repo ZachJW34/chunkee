@@ -250,6 +250,9 @@ pub trait Block: Default {
         }
     }
     fn collision(&self) -> VoxelCollision;
+    fn should_render_face(&self, face: BlockFace) -> bool {
+        true
+    }
 }
 
 pub trait Where<T> {}

@@ -4,7 +4,7 @@ Chunkee is a voxel engine written in Rust, designed to be integrated with the Go
 
 ## Demo
 
-![Chunkee Demo](demo.png)
+<img width="924" height="520" alt="Screenshot 2026-01-20 at 1 03 15 PM" src="https://github.com/user-attachments/assets/e226bbed-f060-47fe-996e-16e609c5e0cc" />
 
 ## How to Use
 

@@ -35,14 +35,19 @@ The project is structured as a Cargo workspace and is made up of two main compon
 ## Improvements
 
 - Project:
-  - Move example Godot project out of chunkee-godot and into separate folder
   - Make chunkee-godot agnostic
 
 - Meshing:
   - Faster meshing crate: https://crates.io/crates/binary-greedy-meshing
+  - Different voxel rendering methods (Transvoxel, Dual Contouring etc..)
 
 - Generation:
   - Come up with system for placing entities across chunk boundaries (trees, buildings etc..)
+  - Better API for converting between coordinate systems (world_position, world_vector, LOD, voxel_size)
 
 - Rendering
   - Move mesh packing to ChunkeeManager worker thread
+
+- Performance
+  - Object pools to reduce memory fragmentation and improve cache locality
+  - Better chunk deallocation, SVO interner is currently bloating.

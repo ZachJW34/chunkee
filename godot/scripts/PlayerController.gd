@@ -11,6 +11,7 @@ extends CharacterBody3D
 
 ## Flying Movement Variables
 @export_group("Flying")
+@export var fly_sprint_speed: float = 8.0
 @export var fly_speed: float = 12.0 # Speed for flying mode
 
 ## General Variables
@@ -102,7 +103,7 @@ func _handle_walk_movement(delta: float) -> void:
 # Handles the new flying logic
 func _handle_fly_movement(delta: float) -> void:
 	# Use fly_speed, but allow sprinting to go faster
-	var current_speed = fly_speed * 1.5 if Input.is_action_pressed("sprint") else fly_speed
+	var current_speed = fly_speed * fly_sprint_speed if Input.is_action_pressed("sprint") else fly_speed
 
 	# Get input direction based on the CAMERA's GLOBAL orientation
 	var input_dir := Vector3.ZERO

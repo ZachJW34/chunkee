@@ -6,49 +6,42 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 use block_mesh::VoxelVisibility;
 use crossbeam::queue::SegQueue;
 use crossbeam_channel::{Receiver, Sender};
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use glam::{IVec3, Vec3};
 use parking_lot::{Condvar, Mutex};
 
 use crate::{
-    aabb::AABB,
-    block::{BLOCK_FACES, ChunkeeVoxel, VoxelId},
-    chunk::{CHUNK_SIDE_32, Chunk, get_voxel_edge_faces},
-    coords::{
-        ChunkVector, LocalVector, NEIGHBOR_OFFSETS, WorldVector, cv_to_wv, wp_to_cv, wp_to_wv,
-        wv_to_cv, wv_to_lv,
-    },
+    block::{ChunkeeVoxel, VoxelId},
+    chunk::{Chunk, get_voxel_edge_faces},
+    clipmap::{ChunkKey, ClipMap, LODConfig},
+    coords::{CHUNK_SIZE, NEIGHBOR_OFFSETS, wp_to_wv, wv_to_lv},
     generation::VoxelGenerator,
-    hasher::VoxelHashMap,
     meshing::{ChunkMeshGroup, PhysicsMesh, mesh_chunk, mesh_physics_chunk},
-    storage::{ChunkStore, PersistedChunk},
-    streaming::{CameraData, ChunkRadius, compute_priority},
+    storage::ChunkStore,
+    streaming::{CameraData, compute_priority},
     sv64::{Interner, SV64Tree},
     traversal::DDAState,
 };
 
 pub enum VoxelRaycast<V: ChunkeeVoxel> {
-    Hit((WorldVector, V)),
+    Hit((IVec3, V)),
     Miss,
     None,
 }
 
 #[derive(Debug, Clone)]
-pub struct Deltas(pub VoxelHashMap<VoxelId>);
+pub struct Deltas(pub FxHashMap<IVec3, VoxelId>);
 
 impl Default for Deltas {
     fn default() -> Self {
         Self(Default::default())
     }
-}
-
-pub fn neighbors_of(cv: IVec3) -> [ChunkVector; 6] {
-    BLOCK_FACES.map(|face| cv + face.into_normal())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -70,199 +63,102 @@ pub type ChunkVersion = u32;
 
 #[derive(Debug, Clone)]
 pub struct WorldChunk {
-    pub cv: ChunkVector,
+    pub key: ChunkKey,
     pub state: ChunkState,
     pub tree: SV64Tree,
     pub deltas: Deltas,
     pub is_dirty: bool,
     pub version: ChunkVersion,
-    pub uniform: Option<VoxelId>,
     pub physics_state: PhysicsState,
 }
 
 impl Default for WorldChunk {
     fn default() -> Self {
         Self {
-            cv: ChunkVector::MAX,
+            key: ChunkKey::MAX,
             state: ChunkState::None,
             tree: Default::default(),
             deltas: Deltas::default(),
             is_dirty: false,
             version: 0,
-            uniform: None,
             physics_state: PhysicsState::None,
         }
     }
 }
 
 impl WorldChunk {
+    #[inline(always)]
     pub fn is_stable(&self) -> bool {
         matches!(self.state, ChunkState::Meshing | ChunkState::MeshReady)
     }
 
-    pub fn reuse(&mut self, cv: ChunkVector) {
+    #[inline(always)]
+    pub fn is_editable(&self) -> bool {
+        self.is_stable() && self.key.lod == 0
+    }
+
+    #[inline(always)]
+    pub fn reuse(&mut self, key: ChunkKey) {
+        self.key = key;
         self.tree = Default::default();
-        self.cv = cv;
         self.is_dirty = false;
         self.state = ChunkState::Loading;
         self.deltas = Deltas::default();
-        self.uniform = None;
         self.physics_state = PhysicsState::None;
         self.version = 0;
     }
 }
 
-fn floor_div(a: i32, b: i32) -> i32 {
-    let d = a / b;
-    let r = a % b;
-    if r != 0 && (a < 0) != (b < 0) {
-        d - 1
-    } else {
-        d
-    }
-}
-
-enum ClipmapUpdate {
-    Initialized,
-    Shift(ClipMap),
-}
-
-#[derive(Debug, Clone)]
-struct ClipMap {
-    grid_anchor: IVec3,
-    dimensions: IVec3,
-    // num_lods: u32,
-    snap_distance: i32,
-    initialized: bool,
-}
-
-impl ClipMap {
-    fn new(radius: ChunkRadius, num_lods: u32) -> Self {
-        let dimensions = radius.span().as_ivec3();
-        let snap_distance = if num_lods <= 1 {
-            1
-        } else {
-            1 << (num_lods - 1) // 2^(num_lods - 1)
-        };
-
-        Self {
-            grid_anchor: IVec3::MAX,
-            dimensions,
-            snap_distance,
-            // num_lods,
-            initialized: false,
-        }
-    }
-
-    fn lod_snap(&self, camera_cv: ChunkVector) -> ChunkVector {
-        let snap = self.snap_distance;
-
-        if snap == 1 {
-            return camera_cv;
-        };
-
-        let half_snap = snap / 2;
-
-        let snapped_x = floor_div(camera_cv.x + half_snap, snap) * snap;
-        let snapped_y = floor_div(camera_cv.y + half_snap, snap) * snap;
-        let snapped_z = floor_div(camera_cv.z + half_snap, snap) * snap;
-
-        ChunkVector::new(snapped_x, snapped_y, snapped_z)
-    }
-
-    pub fn update(&mut self, camera_cv: ChunkVector) -> Option<ClipmapUpdate> {
-        if !self.initialized {
-            self.grid_anchor = self.lod_snap(camera_cv);
-            self.initialized = true;
-
-            return Some(ClipmapUpdate::Initialized);
-        }
-
-        let target_anchor = self.lod_snap(camera_cv);
-        let shift = target_anchor - self.grid_anchor;
-
-        if shift != IVec3::ZERO {
-            let previous = self.clone();
-            self.grid_anchor = target_anchor;
-            Some(ClipmapUpdate::Shift(previous))
-        } else {
-            None
-        }
-    }
-
-    pub fn get_grid_origin(&self) -> IVec3 {
-        self.grid_anchor - (self.dimensions / 2)
-    }
-
-    pub fn to_aabb(&self) -> AABB {
-        let grid_origin = self.get_grid_origin();
-
-        AABB::new(grid_origin, grid_origin + self.dimensions)
-    }
-
-    pub fn cv_in_range(&self, cv: ChunkVector) -> bool {
-        let min = self.get_grid_origin();
-        let max = min + self.dimensions;
-
-        cv.x >= min.x
-            && cv.x < max.x
-            && cv.y >= min.y
-            && cv.y < max.y
-            && cv.z >= min.z
-            && cv.z < max.z
-    }
-}
-
 pub struct ChunkManager {
     pool: Vec<WorldChunk>,
-    map: FxHashMap<ChunkVector, WorldChunk>,
+    map: FxHashMap<ChunkKey, WorldChunk>,
 }
 
 impl ChunkManager {
-    fn new(radius: ChunkRadius) -> Self {
-        let total_chunks = radius.chunk_count() as usize;
-
-        let pool: Vec<WorldChunk> = vec![WorldChunk::default(); total_chunks];
-        let map = FxHashMap::with_capacity_and_hasher(total_chunks, Default::default());
+    fn new(num_chunks: u32) -> Self {
+        let pool: Vec<WorldChunk> = vec![WorldChunk::default(); num_chunks as usize];
+        let map = FxHashMap::with_capacity_and_hasher(num_chunks as usize, Default::default());
 
         Self { pool, map }
     }
 
-    fn insert_chunk(&mut self, cv: ChunkVector) {
+    fn insert_chunk(&mut self, key: ChunkKey) {
         let mut new_chunk = self.pool.pop().unwrap_or_else(|| WorldChunk::default());
-        new_chunk.reuse(cv);
-        self.map.insert(cv, new_chunk);
+        new_chunk.reuse(key);
+        self.map.insert(key, new_chunk);
     }
 
-    fn remove_chunk<F: FnMut(&mut WorldChunk)>(&mut self, cv: ChunkVector, mut cb: F) {
-        if let Some(mut world_chunk) = self.map.remove(&cv) {
+    fn remove_chunk<F>(&mut self, key: ChunkKey, mut cb: F)
+    where
+        F: FnMut(&mut WorldChunk),
+    {
+        if let Some(mut world_chunk) = self.map.remove(&key) {
             cb(&mut world_chunk);
 
             self.pool.push(world_chunk);
         }
     }
 
-    fn get(&self, cv: ChunkVector) -> Option<&WorldChunk> {
-        self.map.get(&cv)
+    fn get(&self, key: ChunkKey) -> Option<&WorldChunk> {
+        self.map.get(&key)
     }
 
-    fn get_mut(&mut self, cv: ChunkVector) -> Option<&mut WorldChunk> {
-        self.map.get_mut(&cv)
+    fn get_mut(&mut self, key: ChunkKey) -> Option<&mut WorldChunk> {
+        self.map.get_mut(&key)
     }
 }
 
 #[derive(Debug)]
 pub enum WorkerResult {
-    Load(ChunkVector, SV64Tree, Deltas, VoxelUniform),
-    Mesh(ChunkVector, ChunkVersion, Box<ChunkMeshGroup>),
-    PhysicsMesh(ChunkVector, ChunkVersion, PhysicsMesh),
-    Intern(ChunkVector, ChunkVersion, SV64Tree),
+    Load(ChunkKey, SV64Tree, Deltas, Box<ChunkMeshGroup>),
+    Mesh(ChunkKey, ChunkVersion, Box<ChunkMeshGroup>),
+    PhysicsMesh(ChunkKey, ChunkVersion, PhysicsMesh),
+    Intern(ChunkKey, ChunkVersion, SV64Tree),
 }
 
 struct MeshPayload {
     version: ChunkVersion,
     tree: SV64Tree,
-    neighbors: [Option<SV64Tree>; 6],
 }
 
 struct PhysicsPayload {
@@ -271,7 +167,7 @@ struct PhysicsPayload {
 }
 
 struct WorkerJob<T> {
-    cv: ChunkVector,
+    key: ChunkKey,
     priority: u32,
     payload: T,
 }
@@ -279,12 +175,12 @@ struct WorkerJob<T> {
 type LoadJob = WorkerJob<()>;
 type MeshJob = WorkerJob<MeshPayload>;
 type PhysicsJob = WorkerJob<PhysicsPayload>;
-type SaveJob = Vec<(ChunkVector, PersistedChunk)>;
+type SaveJob = Vec<(ChunkKey, Deltas)>;
 
 impl<T> WorkerJob<T> {
-    fn new(cv: ChunkVector, priority: u32, payload: T) -> Self {
+    fn new(key: ChunkKey, priority: u32, payload: T) -> Self {
         Self {
-            cv,
+            key,
             priority,
             payload,
         }
@@ -311,7 +207,7 @@ impl<T> Ord for WorkerJob<T> {
 struct Queues {
     load: SegQueue<LoadJob>,
     mesh: SegQueue<MeshJob>,
-    intern: SegQueue<(ChunkVector, ChunkVersion, SV64Tree)>,
+    intern: SegQueue<(ChunkKey, ChunkVersion, SV64Tree)>,
     edits: SegQueue<MeshJob>,
     physics: SegQueue<PhysicsJob>,
     saves: SegQueue<SaveJob>,
@@ -363,9 +259,9 @@ impl Queues {
     ) {
         let mut next_tasks = Vec::with_capacity(queue.len());
         while let Some(job) = queue.pop() {
-            if clipmap.cv_in_range(job.cv) {
-                let priority = compute_priority(job.cv, camera_data, voxel_size);
-                let new_job = WorkerJob::<T>::new(job.cv, priority, job.payload);
+            if clipmap.is_chunk_valid(job.key) {
+                let priority = compute_priority(job.key, camera_data, voxel_size);
+                let new_job = WorkerJob::<T>::new(job.key, priority, job.payload);
                 next_tasks.push(new_job);
             }
         }
@@ -393,14 +289,14 @@ impl JobQueue {
 }
 
 pub enum Update {
-    Mesh(ChunkVector, Box<ChunkMeshGroup>),
-    MeshUnload(ChunkVector),
-    Physics(ChunkVector, PhysicsMesh),
-    PhysicsUnload(ChunkVector),
+    Mesh(ChunkKey, Box<ChunkMeshGroup>),
+    MeshUnload(ChunkKey),
+    Physics(ChunkKey, PhysicsMesh),
+    PhysicsUnload(ChunkKey),
 }
 
 pub struct ChunkeeConfig {
-    pub radius: ChunkRadius,
+    pub lod_config: LODConfig,
     pub voxel_size: f32,
     pub thread_count: usize,
     pub generator: Box<dyn VoxelGenerator>,
@@ -410,6 +306,7 @@ const CAMERA_THRESHOLD_RADIANS: f32 = 0.5;
 
 pub struct ChunkeeManager<V: 'static + ChunkeeVoxel> {
     pub updates: Vec<Update>,
+    pub freeze_clipmap: bool,
     clipmap: ClipMap,
     active: Arc<AtomicBool>,
     config: Arc<ChunkeeConfig>,
@@ -422,20 +319,24 @@ pub struct ChunkeeManager<V: 'static + ChunkeeVoxel> {
     result_rx: Receiver<WorkerResult>,
     physics_manager: PhysicsManager,
     interner: Arc<Mutex<Interner>>,
-    last_camera_wv: Option<WorldVector>,
+    last_camera_wv: Option<IVec3>,
+    pending_unloads: FxHashSet<ChunkKey>,
+    pending_saves: FxHashSet<ChunkKey>,
+    last_save: Instant,
     _voxel_type: PhantomData<V>,
 }
 
 impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
     pub fn new(config: ChunkeeConfig) -> Self {
         let (result_tx, result_rx) = crossbeam_channel::unbounded::<WorkerResult>();
-        let chunk_count = config.radius.chunk_count();
+        let num_chunks = config.lod_config.num_chunks();
 
         Self {
             updates: Vec::new(),
-            clipmap: ClipMap::new(config.radius, 3),
+            freeze_clipmap: false,
+            clipmap: ClipMap::new(config.lod_config.clone()),
             active: Arc::new(AtomicBool::new(false)),
-            chunk_manager: ChunkManager::new(config.radius),
+            chunk_manager: ChunkManager::new(num_chunks),
             config: Arc::new(config),
             camera: None,
             chunk_store: Arc::new(ChunkStore::new()),
@@ -444,8 +345,11 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
             result_tx,
             result_rx,
             physics_manager: PhysicsManager::new(),
-            interner: Arc::new(Mutex::new(Interner::new(chunk_count))),
+            interner: Arc::new(Mutex::new(Interner::new(num_chunks))),
             last_camera_wv: None,
+            pending_unloads: Default::default(),
+            pending_saves: Default::default(),
+            last_save: Instant::now(),
             _voxel_type: PhantomData,
         }
     }
@@ -474,6 +378,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
 
         self.workers = worker_threads;
+        self.last_save = Instant::now();
     }
 
     pub fn stop(&mut self) {
@@ -500,19 +405,21 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         );
 
         for _ in 0..(max_steps as usize) {
-            let pos = dda.next_voxelpos;
-            let cv = wv_to_cv(pos);
+            let wv = dda.next_voxelpos;
 
-            if let Some(world_chunk) = self.chunk_manager.get(cv) {
+            if let Some(key) = self.clipmap.wv_to_chunk_key(wv)
+                && key.lod == 0
+                && let Some(world_chunk) = self.chunk_manager.get(key)
+            {
                 if !world_chunk.is_stable() {
                     return VoxelRaycast::None;
                 }
 
-                let lv = wv_to_lv(pos);
+                let lv = wv_to_lv(wv);
                 let voxel_id = world_chunk.tree.get_voxel(lv);
                 let voxel = V::from(voxel_id.type_id());
                 if voxel.visibilty() != VoxelVisibility::Empty {
-                    return VoxelRaycast::Hit((pos, voxel));
+                    return VoxelRaycast::Hit((wv, voxel));
                 }
 
                 dda.step_mut();
@@ -527,17 +434,21 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         &mut self,
         camera: CameraData,
         physics_entities: Vec<Vec3>,
-        edits: &[(WorldVector, V)],
+        edits: &[(IVec3, V)],
     ) {
         if !self.active.load(Ordering::Relaxed) {
             return;
         }
 
         let significant_drift = self.update_camera(camera);
-        self.update_clipmap(&camera);
+        if !self.freeze_clipmap || self.clipmap.anchor == IVec3::MAX {
+            self.update_clipmap(&camera);
+        }
         self.handle_physics(physics_entities, &camera);
         self.process_edits(edits);
-        self.process_worker_results(&camera);
+        self.process_worker_results();
+        // TODO: Need to do this every tick?
+        self.reap_obsolete_chunks();
 
         if significant_drift {
             self.job_queue.queues.reprioritze_queues(
@@ -548,21 +459,26 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
 
         if !self.job_queue.queues.is_empty() {
-            // self.job_queue.queues.print();
+            self.job_queue.queues.print();
             self.job_queue.cvar.notify_all();
         }
+
+        self.save_edits();
     }
 
-    fn process_edits(&mut self, edits: &[(WorldVector, V)]) {
-        let mut voxel_edits: FxHashMap<ChunkVector, Vec<(LocalVector, VoxelId)>> =
+    fn process_edits(&mut self, edits: &[(IVec3, V)]) {
+        let mut voxel_edits: FxHashMap<ChunkKey, Vec<(IVec3, VoxelId)>> =
             FxHashMap::with_hasher(Default::default());
-        let mut chunks_to_mesh: FxHashMap<ChunkVector, bool> =
+        let mut chunks_to_mesh: FxHashMap<ChunkKey, bool> =
             FxHashMap::with_hasher(Default::default());
 
         for (wv, voxel) in edits {
-            let (cv, lv) = (wv_to_cv(*wv), wv_to_lv(*wv));
+            let Some(key) = self.clipmap.wv_to_chunk_key(*wv) else {
+                continue;
+            };
+            let lv = wv_to_lv(*wv);
             let voxel_id = VoxelId::new((*voxel).into());
-            match voxel_edits.entry(cv) {
+            match voxel_edits.entry(key) {
                 Entry::Occupied(mut occ) => {
                     occ.get_mut().push((lv, voxel_id));
                 }
@@ -572,9 +488,9 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
             }
         }
 
-        for (cv, edits) in voxel_edits.iter_mut() {
-            if let Some(world_chunk) = self.chunk_manager.get_mut(*cv)
-                && world_chunk.is_stable()
+        for (key, edits) in voxel_edits.iter_mut() {
+            if let Some(world_chunk) = self.chunk_manager.get_mut(*key)
+                && world_chunk.is_editable()
             {
                 world_chunk.tree.set_voxels(edits);
                 world_chunk.is_dirty = true;
@@ -587,31 +503,37 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                     if neighbors_mask.count_ones() > 0 {
                         for affected in affected_neighbors {
                             if let Some(face) = affected {
-                                let neighbor_cv = cv + face.into_normal();
-                                chunks_to_mesh.entry(neighbor_cv).or_insert(false);
+                                let neighbor_wv = key.to_wv() + face.into_normal();
+                                if let Some(neighbor_key) =
+                                    self.clipmap.wv_to_chunk_key(neighbor_wv)
+                                    && key.lod == 0
+                                {
+                                    chunks_to_mesh.entry(neighbor_key).or_insert(false);
+                                }
                             }
                         }
                     }
                 }
 
-                chunks_to_mesh.insert(*cv, true);
+                chunks_to_mesh.insert(*key, true);
 
                 self.job_queue.queues.intern.push((
-                    world_chunk.cv,
+                    world_chunk.key,
                     world_chunk.version,
                     world_chunk.tree.clone(),
                 ));
+                self.pending_saves.insert(*key);
             }
         }
 
-        for (cv, edited) in chunks_to_mesh {
-            if let Some(world_chunk) = self.chunk_manager.get_mut(cv)
+        for (key, edited) in chunks_to_mesh {
+            if let Some(world_chunk) = self.chunk_manager.get_mut(key)
                 && world_chunk.is_stable()
             {
-                if edited && self.physics_manager.pchunks.contains(&cv) {
+                if edited && self.physics_manager.pchunks.contains(&key) {
                     world_chunk.physics_state = PhysicsState::Meshing;
                     self.job_queue.queues.physics.push(PhysicsJob::new(
-                        cv,
+                        key,
                         0,
                         PhysicsPayload {
                             version: world_chunk.version,
@@ -621,31 +543,25 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                 }
 
                 world_chunk.state = ChunkState::Meshing;
-
-                if let MeshableResult::Ready(payload) = self.meshable(cv) {
-                    self.job_queue
-                        .queues
-                        .edits
-                        .push(MeshJob::new(cv, 0, payload));
-                }
+                self.job_queue.queues.edits.push(MeshJob::new(
+                    key,
+                    0,
+                    MeshPayload {
+                        version: world_chunk.version,
+                        tree: world_chunk.tree.clone(),
+                    },
+                ));
             }
         }
     }
 
     fn update_camera(&mut self, current: CameraData) -> bool {
         let current_wv = wp_to_wv(current.pos, self.config.voxel_size);
-        // if let Some(previous_wv) = self.last_camera_wv
-        //     && previous_wv != current_wv
-        // {
-        //     println!("camera: {previous_wv}=>{current_wv}");
-        // } else if self.last_camera_wv.is_none() {
-        //     println!("camera: {current_wv}");
-        // }
         self.last_camera_wv = Some(current_wv);
 
         if let Some(previous) = self.camera {
-            let current_cv = wp_to_cv(current.pos, self.config.voxel_size);
-            let previous_cv = wp_to_cv(previous.pos, self.config.voxel_size);
+            let current_cv = wp_to_wv(current.pos, self.config.voxel_size);
+            let previous_cv = wp_to_wv(previous.pos, self.config.voxel_size);
             let significant = (current_cv != previous_cv)
                 || (current.forward.angle_between(previous.forward) > CAMERA_THRESHOLD_RADIANS);
 
@@ -662,97 +578,63 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
 
     #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn update_clipmap(&mut self, camera: &CameraData) {
-        let camera_cv = wp_to_cv(camera.pos, self.config.voxel_size);
-        if let Some(update) = self.clipmap.update(camera_cv) {
-            let (added, removed): (Vec<AABB>, Vec<AABB>) = match update {
-                ClipmapUpdate::Initialized => (vec![self.clipmap.to_aabb()], vec![]),
-                ClipmapUpdate::Shift(previous) => {
-                    self.clipmap.to_aabb().difference(&previous.to_aabb())
-                }
-            };
+        let player_wv = wp_to_wv(camera.pos, self.config.voxel_size);
+        let events = self.clipmap.update(player_wv);
+        let mut chunks_to_persist = vec![];
 
-            let mut chunks_to_persist = Vec::new();
-            for cv in removed.iter().flat_map(|aabb| aabb.iter()) {
-                self.chunk_manager.remove_chunk(cv, |world_chunk| {
-                    if world_chunk.is_dirty {
-                        chunks_to_persist.push((
-                            world_chunk.cv,
-                            PersistedChunk {
-                                deltas: std::mem::take(&mut world_chunk.deltas),
-                                uniform_voxel_id: world_chunk.uniform.take(),
-                            },
-                        ))
+        if events.anchor_shifted {
+            for key in events.to_unload {
+                self.chunk_manager.remove_chunk(key, |world_chunk| {
+                    if world_chunk.is_dirty && world_chunk.key.lod == 0 {
+                        chunks_to_persist
+                            .push((world_chunk.key, std::mem::take(&mut world_chunk.deltas)));
                     }
 
                     if world_chunk.state == ChunkState::MeshReady {
-                        self.updates.push(Update::MeshUnload(world_chunk.cv));
+                        if self.clipmap.contains(key.to_wv()) {
+                            self.pending_unloads.insert(key);
+                        } else {
+                            self.updates.push(Update::MeshUnload(key));
+                        }
                     }
                 });
             }
+        }
 
-            if !chunks_to_persist.is_empty() {
-                self.job_queue.queues.saves.push(chunks_to_persist);
-            }
+        if !chunks_to_persist.is_empty() {
+            self.job_queue.queues.saves.push(chunks_to_persist);
+        }
 
-            for cv in added.iter().flat_map(|aabb| aabb.iter()) {
-                self.chunk_manager.insert_chunk(cv);
+        for key in events.to_load {
+            self.chunk_manager.insert_chunk(key);
 
-                let priority = compute_priority(cv, &camera, self.config.voxel_size);
-                self.job_queue
-                    .queues
-                    .load
-                    .push(LoadJob::new(cv, priority, ()));
-            }
+            let priority = compute_priority(key, &camera, self.config.voxel_size);
+            self.job_queue
+                .queues
+                .load
+                .push(LoadJob::new(key, priority, ()));
         }
     }
 
     #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
-    fn process_worker_results(&mut self, camera: &CameraData) {
+    fn process_worker_results(&mut self) {
         while let Ok(message) = self.result_rx.try_recv() {
             match message {
-                WorkerResult::Load(cv, tree, deltas, voxel_uniform) => {
-                    let mut meshable_chunk_candidates = vec![];
-                    if let Some(world_chunk) = self.chunk_manager.get_mut(cv)
+                WorkerResult::Load(key, tree, deltas, mesh_group) => {
+                    if let Some(world_chunk) = self.chunk_manager.get_mut(key)
                         && world_chunk.state == ChunkState::Loading
                     {
                         world_chunk.tree = tree;
                         world_chunk.deltas = deltas;
-                        match voxel_uniform {
-                            VoxelUniform::None => world_chunk.uniform = None,
-                            VoxelUniform::Loaded(voxel_id) => world_chunk.uniform = Some(voxel_id),
-                            VoxelUniform::Generated(voxel_id) => {
-                                world_chunk.uniform = Some(voxel_id);
-                                world_chunk.is_dirty = true
-                            }
-                        };
 
                         self.job_queue.queues.intern.push((
-                            world_chunk.cv,
+                            world_chunk.key,
                             world_chunk.version,
                             world_chunk.tree.clone(),
                         ));
 
-                        if let Some(uniform) = world_chunk.uniform
-                            && uniform == VoxelId::AIR
-                        {
-                            world_chunk.state = ChunkState::MeshReady;
-                        } else {
-                            world_chunk.state = ChunkState::Meshing;
-                            meshable_chunk_candidates.push(cv);
-                        }
-
-                        meshable_chunk_candidates.extend_from_slice(&neighbors_of(cv));
-                    }
-
-                    for cv in meshable_chunk_candidates {
-                        if let MeshableResult::Ready(payload) = self.meshable(cv) {
-                            let priority = compute_priority(cv, &camera, self.config.voxel_size);
-
-                            self.job_queue
-                                .queues
-                                .mesh
-                                .push(MeshJob::new(cv, priority, payload))
-                        }
+                        world_chunk.state = ChunkState::MeshReady;
+                        self.updates.push(Update::Mesh(key, mesh_group));
                     }
                 }
                 WorkerResult::Mesh(cv, version, mesh_group) => {
@@ -786,9 +668,9 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
 
     #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn handle_physics(&mut self, physics_entities: Vec<Vec3>, camera: &CameraData) {
-        let stale_pchunks = self
-            .physics_manager
-            .update(physics_entities, self.config.voxel_size);
+        let stale_pchunks =
+            self.physics_manager
+                .update(physics_entities, &self.clipmap, self.config.voxel_size);
 
         for cv in stale_pchunks {
             if let Some(world_chunk) = self.chunk_manager.get_mut(cv) {
@@ -819,33 +701,65 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
         }
     }
 
-    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
-    fn meshable(&self, cv: ChunkVector) -> MeshableResult {
-        if let Some(world_chunk) = self.chunk_manager.get(cv)
-            && world_chunk.is_stable()
-        {
-            let neighbor_cvs = neighbors_of(cv);
-            let mut neighbors = [const { None }; 6];
+    fn save_edits(&mut self) {
+        let now = Instant::now();
 
-            for (idx, neighbor_cv) in neighbor_cvs.iter().enumerate() {
-                if let Some(neighbor_chunk) = self.chunk_manager.get(*neighbor_cv) {
-                    if neighbor_chunk.is_stable() {
-                        let chunk = neighbor_chunk.tree.clone();
-                        neighbors[idx] = Some(chunk);
-                    } else {
-                        return MeshableResult::NotReady;
+        if now.duration_since(self.last_save).as_secs() > 5 {
+            self.last_save = now;
+            let mut chunks_to_persist = vec![];
+
+            for key in self.pending_saves.drain() {
+                if let Some(world_chunk) = self.chunk_manager.map.get_mut(&key) {
+                    if world_chunk.key.lod == 0 && world_chunk.is_dirty {
+                        chunks_to_persist.push((key, world_chunk.deltas.clone()));
+
+                        world_chunk.is_dirty = false;
                     }
                 }
             }
 
-            MeshableResult::Ready(MeshPayload {
-                version: world_chunk.version,
-                tree: world_chunk.tree.clone(),
-                neighbors: neighbors,
-            })
-        } else {
-            MeshableResult::NotReady
+            if !chunks_to_persist.is_empty() {
+                self.job_queue.queues.saves.push(chunks_to_persist);
+            }
         }
+    }
+
+    fn reap_obsolete_chunks(&mut self) {
+        self.pending_unloads.retain(|key| {
+            let wv = key.to_wv();
+            let Some(current) = self.clipmap.wv_to_chunk_key(wv) else {
+                self.updates.push(Update::MeshUnload(*key));
+                return false;
+            };
+
+            if current.lod < key.lod {
+                //// Refining -> Check to see if children of this LOD can replace it
+                if let Some(children) = key.children() {
+                    for child in children.iter().flat_map(|key| self.chunk_manager.get(*key)) {
+                        if child.state != ChunkState::MeshReady {
+                            return true;
+                        }
+                    }
+                }
+
+                self.updates.push(Update::MeshUnload(*key));
+                return false;
+            }
+            // Coarsening -> Check if
+            else {
+                // Coarsening -> Check if
+                if let Some(parent_key) = key.parent(self.config.lod_config.max_lod) {
+                    if let Some(parent_chunk) = self.chunk_manager.get(parent_key) {
+                        if parent_chunk.state != ChunkState::MeshReady {
+                            return true;
+                        }
+                    }
+                }
+
+                self.updates.push(Update::MeshUnload(*key));
+                return false;
+            };
+        });
     }
 }
 
@@ -878,18 +792,22 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
                 return;
             }
 
-            if let Some(job) = job_queue.queues.saves.pop() {
-                chunk_store.save_chunks(job);
+            if let Some(job) = job_queue.queues.physics.pop() {
+                let chunk = job.payload.tree.to_chunk();
+                let mesh = mesh_physics_chunk::<V>(job.key, chunk, config.voxel_size);
+                result_tx
+                    .send(WorkerResult::PhysicsMesh(
+                        job.key,
+                        job.payload.version,
+                        mesh,
+                    ))
+                    .ok();
+
                 continue;
             }
 
-            if let Some(job) = job_queue.queues.physics.pop() {
-                let chunk = job.payload.tree.to_chunk();
-                let mesh = mesh_physics_chunk::<V>(job.cv, chunk, config.voxel_size);
-                result_tx
-                    .send(WorkerResult::PhysicsMesh(job.cv, job.payload.version, mesh))
-                    .ok();
-
+            while let Some(job) = job_queue.queues.saves.pop() {
+                chunk_store.save_chunks(job, &config.lod_config);
                 continue;
             }
 
@@ -900,20 +818,37 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
                 .or_else(|| job_queue.queues.mesh.pop())
             {
                 let chunk = job.payload.tree.to_chunk();
-                let neighbors = job
-                    .payload
-                    .neighbors
-                    .map(|m_tree| m_tree.and_then(|tree| Some(tree.to_chunk())));
-                let mesh_group = mesh_chunk::<V>(job.cv, chunk, neighbors, config.voxel_size);
+                let mesh_group = mesh_chunk::<V>(job.key, chunk, config.voxel_size);
                 result_tx
                     .send(WorkerResult::Mesh(
-                        job.cv,
+                        job.key,
                         job.payload.version,
                         Box::new(mesh_group),
                     ))
                     .ok();
 
                 continue;
+            }
+
+            if let Some(job) = job_queue.queues.load.pop() {
+                // TODO: Don't need to create 32x32x32 chunk if uniform
+                let (chunk, deltas) =
+                    load_chunk(job.key, &chunk_store, &config.generator, config.voxel_size);
+                let tree = SV64Tree::from_chunk(&chunk);
+                let mesh_group = if tree.is_air() {
+                    ChunkMeshGroup::default()
+                } else {
+                    mesh_chunk::<V>(job.key, chunk, config.voxel_size)
+                };
+
+                result_tx
+                    .send(WorkerResult::Load(
+                        job.key,
+                        tree,
+                        deltas,
+                        Box::new(mesh_group),
+                    ))
+                    .ok();
             }
 
             if !job_queue.queues.intern.is_empty() {
@@ -928,79 +863,32 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
                     continue;
                 }
             }
-
-            if let Some(job) = job_queue.queues.load.pop() {
-                // TODO: Don't need to create 32x32x32 chunk if uniform
-                let (chunk, deltas, uniform) =
-                    load_chunk(job.cv, &chunk_store, &config.generator, config.voxel_size);
-                let tree = SV64Tree::from_chunk(&chunk);
-
-                result_tx
-                    .send(WorkerResult::Load(job.cv, tree, deltas, uniform))
-                    .ok();
-            }
         }
-    }
-}
-
-enum MeshableResult {
-    NotReady,
-    Ready(MeshPayload),
-}
-
-#[derive(Debug)]
-pub enum VoxelUniform {
-    None,
-    Loaded(VoxelId),
-    Generated(VoxelId),
-}
-
-impl Default for VoxelUniform {
-    fn default() -> Self {
-        VoxelUniform::None
     }
 }
 
 #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
 fn load_chunk(
-    cv: ChunkVector,
+    key: ChunkKey,
     chunk_store: &ChunkStore,
     generator: &Box<dyn VoxelGenerator>,
     voxel_size: f32,
-) -> (Chunk, Deltas, VoxelUniform) {
+) -> (Chunk, Deltas) {
     let mut chunk = Chunk::new();
-    let mut deltas = Deltas::default();
-    let mut voxel_uniform = VoxelUniform::None;
+    let deltas = chunk_store.load_chunk(key).unwrap_or_default();
 
-    if let Some(persisted_chunk) = chunk_store.load_chunk(cv) {
-        deltas = persisted_chunk.deltas;
-
-        if let Some(uniform) = persisted_chunk.uniform_voxel_id {
-            voxel_uniform = VoxelUniform::Loaded(uniform)
-        }
-    }
-
-    if let VoxelUniform::Loaded(uniform) = voxel_uniform {
-        chunk.fill(uniform);
-    } else {
-        generator.apply(cv_to_wv(cv), &mut chunk, voxel_size);
-        let first = &chunk.voxels[0];
-        if chunk.voxels.iter().all(|v| v == first) {
-            voxel_uniform = VoxelUniform::Generated(*first);
-        }
-    }
-
+    generator.apply(key, &mut chunk, voxel_size);
     merge_deltas(&mut chunk, &deltas);
 
-    (chunk, deltas, voxel_uniform)
+    (chunk, deltas)
 }
 
 struct PhysicsManager {
-    pub pchunks: HashSet<ChunkVector>,
+    pub pchunks: FxHashSet<ChunkKey>,
 }
 
 impl PhysicsManager {
-    const PHYSICS_RADIUS: i32 = CHUNK_SIDE_32 / 2;
+    const PHYSICS_RADIUS: i32 = CHUNK_SIZE / 2;
 
     fn new() -> Self {
         Self {
@@ -1008,16 +896,16 @@ impl PhysicsManager {
         }
     }
 
-    fn update(&mut self, entities: Vec<Vec3>, voxel_size: f32) -> Vec<ChunkVector> {
+    fn update(&mut self, entities: Vec<Vec3>, clipmap: &ClipMap, voxel_size: f32) -> Vec<ChunkKey> {
         let mut required_pchunks = HashSet::default();
         for entity in entities {
             for offset in NEIGHBOR_OFFSETS {
                 let entity_wv = wp_to_wv(entity, voxel_size);
                 let radius = offset * Self::PHYSICS_RADIUS;
                 let neighbor_wv = entity_wv + radius;
-                let neighbor_cv = wv_to_cv(neighbor_wv);
-
-                required_pchunks.insert(neighbor_cv);
+                if let Some(key) = clipmap.wv_to_chunk_key(neighbor_wv) {
+                    required_pchunks.insert(key);
+                }
             }
         }
 

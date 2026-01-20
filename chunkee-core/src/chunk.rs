@@ -5,33 +5,28 @@ use crate::{
     block::{
         BlockFace, ChunkeeVoxel, NeighborsMask, VoxelId, VoxelVisibility, neighbors_mask_to_faces,
     },
-    coords::LocalVector,
+    coords::{CHUNK_SIZE, CHUNK_VOLUME},
 };
 
-pub const CHUNK_SIDE_32: i32 = 32;
-pub const CHUNK_VOLUME_32: usize = (CHUNK_SIDE_32 * CHUNK_SIDE_32 * CHUNK_SIDE_32) as usize;
 type Shape32 = ConstShape3u32<32, 32, 32>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Chunk {
-    pub(crate) voxels: [VoxelId; CHUNK_VOLUME_32],
+    pub(crate) voxels: [VoxelId; CHUNK_VOLUME as usize],
     // pub(crate) solid_count: u32,
 }
 
 impl Chunk {
-    pub const VOL: usize = CHUNK_VOLUME_32;
-    pub const SIDE: i32 = CHUNK_SIDE_32;
-
     pub fn new() -> Self {
         Self {
-            voxels: [VoxelId::AIR; CHUNK_VOLUME_32],
+            voxels: [VoxelId::AIR; CHUNK_VOLUME as usize],
             // solid_count: 0,
         }
     }
 
     pub fn with_voxel(voxel: VoxelId) -> Self {
         Self {
-            voxels: [voxel; CHUNK_VOLUME_32],
+            voxels: [voxel; CHUNK_VOLUME as usize],
             // solid_count: 0,
         }
     }
@@ -44,7 +39,7 @@ impl Chunk {
         self.voxels[self.linearize(lv)]
     }
 
-    pub fn set_voxel(&mut self, lv: LocalVector, new_voxel_id: VoxelId) -> VoxelId {
+    pub fn set_voxel(&mut self, lv: IVec3, new_voxel_id: VoxelId) -> VoxelId {
         let idx = self.linearize(lv);
         // let new_voxel = new_voxel_id.to_voxel::<V>();
         let old_voxel_id = self.voxels[idx];
@@ -63,7 +58,7 @@ impl Chunk {
         // self.solid_count = voxel_solid_value::<V>(new_voxel) * (self.voxels.len() as u32);
     }
 
-    pub fn set_block<V: ChunkeeVoxel>(&mut self, lv: LocalVector, block: V) -> VoxelId {
+    pub fn set_block<V: ChunkeeVoxel>(&mut self, lv: IVec3, block: V) -> VoxelId {
         let new_id = VoxelId::new(block.into());
         self.set_voxel(lv, new_id)
     }
@@ -78,7 +73,7 @@ impl Chunk {
 
     pub fn is_voxel_on_edge(&self, lv: IVec3) -> bool {
         let min = IVec3::ZERO;
-        let max = IVec3::splat(Self::SIDE - 1);
+        let max = IVec3::splat(CHUNK_SIZE - 1);
 
         (lv.cmpeq(min) | lv.cmpeq(max)).any()
     }
@@ -101,8 +96,9 @@ pub fn voxel_solid_value<V: ChunkeeVoxel>(voxel: V) -> u32 {
 }
 
 fn get_voxel_edge_faces_mask(lv: IVec3) -> NeighborsMask {
+    let lv = lv;
     let mut mask: NeighborsMask = 0;
-    let max = CHUNK_SIDE_32 - 1;
+    let max = CHUNK_SIZE - 1;
 
     if lv.x == 0 {
         mask |= 1 << (BlockFace::Left as u8);

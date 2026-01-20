@@ -2,15 +2,16 @@ mod conversions;
 mod generator;
 mod voxels;
 
+use std::cell::LazyCell;
+
 use crate::{conversions::*, generator::WorldGenerator, voxels::MyVoxels};
 use chunkee_core::{
-    coords::ChunkVector,
+    clipmap::{ChunkKey, LODConfig},
     glam::{IVec3, Vec3},
-    hasher::VoxelHashMap,
     manager::{ChunkeeConfig, ChunkeeManager, Update, VoxelRaycast},
     meshing::{ChunkMeshData, ChunkMeshGroup, PhysicsMesh},
-    streaming::ChunkRadius,
 };
+use fxhash::FxHashMap;
 use godot::{
     classes::{
         CollisionShape3D, ConcavePolygonShape3D, IStaticBody3D, Input, MeshInstance3D, Performance,
@@ -22,6 +23,8 @@ use godot::{
     obj::NewAlloc,
     prelude::*,
 };
+#[cfg(not(target_family = "windows"))]
+use tikv_jemalloc_ctl::{epoch, stats};
 
 #[cfg(not(target_family = "windows"))]
 #[global_allocator]
@@ -37,9 +40,9 @@ unsafe impl ExtensionLibrary for ChunkeeGodotExtension {}
 pub struct ChunkeeWorldNode {
     base: Base<StaticBody3D>,
     chunkee_manager: ChunkeeManager<MyVoxels>,
-    rendered_chunks: VoxelHashMap<Vec<(Rid, Rid)>>,
-    physics_chunks: VoxelHashMap<Gd<CollisionShape3D>>,
-    physics_debug_meshes: VoxelHashMap<Gd<MeshInstance3D>>,
+    rendered_chunks: FxHashMap<ChunkKey, Vec<(Rid, Rid)>>,
+    physics_chunks: FxHashMap<ChunkKey, Gd<CollisionShape3D>>,
+    physics_debug_meshes: FxHashMap<ChunkKey, Gd<MeshInstance3D>>,
     world_scenario: Rid,
     voxel_raycast: VoxelRaycast<MyVoxels>,
     outline_node: Option<Gd<MeshInstance3D>>,
@@ -50,15 +53,41 @@ pub struct ChunkeeWorldNode {
     pub translucent_material: Option<Gd<ShaderMaterial>>,
     // #[export]
     pub voxel_size: f32,
+    #[export]
+    pub freeze_clipmap: bool,
 }
+
+const ARRAY_VERTEX: usize = 0;
+const ARRAY_NORMAL: usize = 1;
+const ARRAY_TANGENT: usize = 2;
+const ARRAY_TEX_UV: usize = 4;
+const ARRAY_CUSTOM0: usize = 6;
+const ARRAY_INDEX: usize = 12;
+const ARRAY_MAX: usize = 13;
+
+const VOXEL_ARRAY_FORMAT: LazyCell<ArrayFormat> = LazyCell::new(|| {
+    ArrayFormat::VERTEX
+        | ArrayFormat::NORMAL
+        | ArrayFormat::TANGENT
+        | ArrayFormat::TEX_UV
+        | ArrayFormat::INDEX
+        | ArrayFormat::CUSTOM0
+        | ArrayFormat::from_ord(4 << ArrayFormat::CUSTOM0_SHIFT.ord())
+});
 
 #[godot_api]
 impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
         println!("Initializing ChunkeeWorldNode");
-        let voxel_size = 1.0;
+        let voxel_size = 0.25;
+        let lod_config = LODConfig {
+            max_lod: 3,
+            draw_distances: vec![8, 8, 8, 8],
+            hysteresis: 0.6,
+        };
+        lod_config.validate();
         let config = ChunkeeConfig {
-            radius: ChunkRadius(24, 8),
+            lod_config,
             generator: Box::new(WorldGenerator::new()),
             voxel_size,
             thread_count: 4,
@@ -78,6 +107,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
             outline_node: None,
             show_physics_debug_mesh: false,
             voxel_size,
+            freeze_clipmap: false,
         }
     }
 
@@ -120,6 +150,10 @@ impl IStaticBody3D for ChunkeeWorldNode {
             return;
         };
         let camera_data = camera.to_camera_data();
+
+        if self.freeze_clipmap != self.chunkee_manager.freeze_clipmap {
+            self.chunkee_manager.freeze_clipmap = self.freeze_clipmap;
+        }
 
         if Input::singleton().is_action_just_pressed("toggle_debug_physics_mesh") {
             self.show_physics_debug_mesh = !self.show_physics_debug_mesh;
@@ -177,13 +211,7 @@ impl IStaticBody3D for ChunkeeWorldNode {
             .update(camera_data, physics_entities, &edits);
         let raycast_res = self
             .chunkee_manager
-            .raycast(camera_data.pos, camera_data.forward, 20);
-        // if let (VoxelRaycast::Hit(prev), VoxelRaycast::Hit(cur)) =
-        //     (&self.voxel_raycast, &raycast_res)
-        //     && prev.0 != cur.0
-        // {
-        //     println!("VoxelRaycast={cur:?}");
-        // };
+            .raycast(camera_data.pos, camera_data.forward, 32);
         self.voxel_raycast = raycast_res;
         self.render();
     }
@@ -206,14 +234,6 @@ impl IStaticBody3D for ChunkeeWorldNode {
         godot_print!("Rendering server cleanup complete.");
     }
 }
-
-const ARRAY_VERTEX: usize = 0;
-const ARRAY_NORMAL: usize = 1;
-const ARRAY_TANGENT: usize = 2;
-const ARRAY_TEX_UV: usize = 4;
-const ARRAY_CUSTOM0: usize = 6;
-const ARRAY_INDEX: usize = 12;
-const ARRAY_MAX: usize = 13;
 
 #[godot_api]
 impl ChunkeeWorldNode {
@@ -249,12 +269,12 @@ impl ChunkeeWorldNode {
     fn render_mesh_group(
         &mut self,
         rs: &mut RenderingServer,
-        cv: ChunkVector,
+        chunk_key: ChunkKey,
         mesh_group: Box<ChunkMeshGroup>,
         opaque_material: &Gd<ShaderMaterial>,
         translucent_material: &Gd<ShaderMaterial>,
     ) {
-        self.remove_mesh_group(cv, rs);
+        self.remove_mesh_group(chunk_key, rs);
 
         let mut new_rids = Vec::new();
         if !mesh_group.opaque.positions.is_empty() {
@@ -274,12 +294,12 @@ impl ChunkeeWorldNode {
         }
 
         if !new_rids.is_empty() {
-            self.rendered_chunks.insert(cv, new_rids);
+            self.rendered_chunks.insert(chunk_key, new_rids);
         }
     }
 
-    fn remove_mesh_group(&mut self, cv: ChunkVector, rs: &mut RenderingServer) {
-        if let Some(old_rids) = self.rendered_chunks.remove(&cv) {
+    fn remove_mesh_group(&mut self, chunk_key: ChunkKey, rs: &mut RenderingServer) {
+        if let Some(old_rids) = self.rendered_chunks.remove(&chunk_key) {
             for (instance_rid, mesh_rid) in old_rids {
                 rs.free_rid(instance_rid);
                 rs.free_rid(mesh_rid);
@@ -287,8 +307,8 @@ impl ChunkeeWorldNode {
         }
     }
 
-    fn render_physics_mesh(&mut self, cv: ChunkVector, pmesh: PhysicsMesh) {
-        self.remove_physics_mesh(cv);
+    fn render_physics_mesh(&mut self, chunk_key: ChunkKey, pmesh: PhysicsMesh) {
+        self.remove_physics_mesh(chunk_key);
 
         if pmesh.is_empty() {
             return;
@@ -296,25 +316,27 @@ impl ChunkeeWorldNode {
 
         let collision_shape_node = create_physics_mesh(&pmesh);
         self.base_mut().add_child(&collision_shape_node);
-        if let Some(mut old_col) = self.physics_chunks.insert(cv, collision_shape_node) {
+        if let Some(mut old_col) = self.physics_chunks.insert(chunk_key, collision_shape_node) {
             old_col.queue_free();
         }
 
         let mut debug_mesh_instance = create_physics_debug_mesh(&pmesh);
         debug_mesh_instance.set_visible(self.show_physics_debug_mesh);
         self.base_mut().add_child(&debug_mesh_instance);
-        if let Some(mut old_debug_mesh) = self.physics_debug_meshes.insert(cv, debug_mesh_instance)
+        if let Some(mut old_debug_mesh) = self
+            .physics_debug_meshes
+            .insert(chunk_key, debug_mesh_instance)
         {
             old_debug_mesh.queue_free();
         }
     }
 
-    fn remove_physics_mesh(&mut self, cv: ChunkVector) {
-        if let Some(mut old_debug_mesh) = self.physics_debug_meshes.remove(&cv) {
+    fn remove_physics_mesh(&mut self, chunk_key: ChunkKey) {
+        if let Some(mut old_debug_mesh) = self.physics_debug_meshes.remove(&chunk_key) {
             old_debug_mesh.queue_free();
         }
 
-        if let Some(mut old_col) = self.physics_chunks.remove(&cv) {
+        if let Some(mut old_col) = self.physics_chunks.remove(&chunk_key) {
             old_col.queue_free();
         }
     }
@@ -334,49 +356,50 @@ impl ChunkeeWorldNode {
 
     #[cfg(not(target_family = "windows"))]
     fn monitor_memory(&self) {
-        use tikv_jemalloc_ctl::{epoch, stats};
+        #[cfg(not(target_family = "windows"))]
+        {
+            let mut perf = Performance::singleton();
 
-        let mut perf = Performance::singleton();
+            let alloc_fn = Callable::from_fn("get_rust_alloc", |_| {
+                // Advance epoch (refresh stats)
+                // We accept that we might advance it multiple times per frame if we have multiple monitors.
+                // It is cheap enough for debug tools.
+                let _ = epoch::advance();
 
-        let alloc_fn = Callable::from_local_fn("get_rust_alloc", |_| {
-            // Advance epoch (refresh stats)
-            // We accept that we might advance it multiple times per frame if we have multiple monitors.
-            // It is cheap enough for debug tools.
-            let _ = epoch::advance();
+                let bytes = stats::allocated::read().unwrap_or(0);
+                let mib = bytes as f64 / 1024.0 / 1024.0;
+                mib
+            });
 
-            let bytes = stats::allocated::read().unwrap_or(0);
-            let mib = bytes as f64 / 1024.0 / 1024.0;
-            Ok(Variant::from(mib))
-        });
+            // --- Monitor 2: Resident (Actual System RAM) ---
+            let res_fn = Callable::from_fn("get_rust_res", |_| {
+                let _ = epoch::advance();
+                let bytes = stats::resident::read().unwrap_or(0);
+                let mib = bytes as f64 / 1024.0 / 1024.0;
+                mib
+            });
 
-        // --- Monitor 2: Resident (Actual System RAM) ---
-        let res_fn = Callable::from_local_fn("get_rust_res", |_| {
-            let _ = epoch::advance();
-            let bytes = stats::resident::read().unwrap_or(0);
-            let mib = bytes as f64 / 1024.0 / 1024.0;
-            Ok(Variant::from(mib))
-        });
+            // --- Monitor 3: Fragmentation % (Optional but cool) ---
+            let frag_fn = Callable::from_fn("get_rust_frag", |_| {
+                let _ = epoch::advance();
+                let alloc = stats::allocated::read().unwrap_or(1) as f64; // avoid div by zero
+                let res = stats::resident::read().unwrap_or(0) as f64;
 
-        // --- Monitor 3: Fragmentation % (Optional but cool) ---
-        let frag_fn = Callable::from_local_fn("get_rust_frag", |_| {
-            let _ = epoch::advance();
-            let alloc = stats::allocated::read().unwrap_or(1) as f64; // avoid div by zero
-            let res = stats::resident::read().unwrap_or(0) as f64;
+                if res == 0.0 {
+                    Variant::from(0.0);
+                }
 
-            if res == 0.0 {
-                return Ok(Variant::from(0.0));
-            }
+                // Calculate percentage of memory that is overhead
+                let frag_percent = ((res - alloc) / res) * 100.0;
+                frag_percent
+            });
 
-            // Calculate percentage of memory that is overhead
-            let frag_percent = ((res - alloc) / res) * 100.0;
-            Ok(Variant::from(frag_percent))
-        });
-
-        // Register them
-        // Note: Using slashes creates folders in the Debugger UI!
-        perf.add_custom_monitor("Chunkee/Allocated (MiB)", &alloc_fn);
-        perf.add_custom_monitor("Chunkee/Resident (MiB)", &res_fn);
-        perf.add_custom_monitor("Chunkee/Fragmentation (%)", &frag_fn);
+            // Register them
+            // Note: Using slashes creates folders in the Debugger UI!
+            perf.add_custom_monitor("Chunkee/Allocated (MiB)", &alloc_fn);
+            perf.add_custom_monitor("Chunkee/Resident (MiB)", &res_fn);
+            perf.add_custom_monitor("Chunkee/Fragmentation (%)", &frag_fn);
+        }
     }
 }
 
@@ -455,14 +478,6 @@ fn create_render_instance(
     mesh_data: ChunkMeshData,
     material: &Gd<ShaderMaterial>,
 ) -> (Rid, Rid) {
-    let array_format = ArrayFormat::VERTEX
-        | ArrayFormat::NORMAL
-        | ArrayFormat::TANGENT
-        | ArrayFormat::TEX_UV
-        | ArrayFormat::INDEX
-        | ArrayFormat::CUSTOM0
-        | ArrayFormat::from_ord(4 << ArrayFormat::CUSTOM0_SHIFT.ord());
-
     let indices = PackedInt32Array::from_iter(mesh_data.indices.iter().map(|i| *i as i32));
     let positions =
         PackedVector3Array::from_iter(mesh_data.positions.iter().map(|p| Vector3::from_array(*p)));
@@ -473,7 +488,7 @@ fn create_render_instance(
         PackedVector2Array::from_iter(mesh_data.uvs.iter().map(|uv| Vector2::from_array(*uv)));
     let layers = PackedFloat32Array::from(mesh_data.layers.as_slice());
 
-    let mut arrays = VariantArray::new();
+    let mut arrays = VarArray::new();
     arrays.resize(ARRAY_MAX, &Variant::nil());
 
     arrays.set(ARRAY_VERTEX, &positions.to_variant());
@@ -486,7 +501,7 @@ fn create_render_instance(
     // 2. Create mesh resource on the server
     let mesh_rid = rs.mesh_create();
     rs.mesh_add_surface_from_arrays_ex(mesh_rid, RenderingServerPrimitiveType::TRIANGLES, &arrays)
-        .compress_format(array_format)
+        .compress_format(*VOXEL_ARRAY_FORMAT)
         .done();
     rs.mesh_surface_set_material(mesh_rid, 0, material.get_rid());
 

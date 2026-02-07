@@ -155,6 +155,29 @@ pub const REGION_2_1: [IVec3; 8] = [
 ];
 
 #[derive(Debug)]
+pub struct BranchNode {
+    pub mask: u64,
+    pub children: Box<[Arc<HashedNode>]>,
+}
+
+#[derive(Debug)]
+pub struct LeafNode {
+    pub voxels: [VoxelId; 8],
+}
+
+#[derive(Debug)]
+pub struct UniformNode {
+    pub voxel: VoxelId,
+}
+
+#[derive(Debug)]
+pub enum NodeKind {
+    Branch(BranchNode),
+    Leaf(LeafNode),
+    Uniform(UniformNode),
+}
+
+#[derive(Debug)]
 pub struct HashedNode {
     pub hash: u64,
     pub node: NodeKind,
@@ -207,29 +230,6 @@ impl HashedNode {
             node: NodeKind::Leaf(LeafNode { voxels }),
         }
     }
-}
-
-#[derive(Debug)]
-pub struct BranchNode {
-    pub mask: u64,
-    pub children: Box<[Arc<HashedNode>]>,
-}
-
-#[derive(Debug)]
-pub struct LeafNode {
-    pub voxels: [VoxelId; 8],
-}
-
-#[derive(Debug)]
-pub struct UniformNode {
-    pub voxel: VoxelId,
-}
-
-#[derive(Debug)]
-pub enum NodeKind {
-    Branch(BranchNode),
-    Leaf(LeafNode),
-    Uniform(UniformNode),
 }
 
 const L0_NO_LEAF: &str = "S64T L0 node for 32^3 chunk cannot be a leaf";
@@ -618,22 +618,22 @@ impl SV64Tree {
 
 pub struct Interner {
     pub map: FxHashMap<u64, Weak<HashedNode>>,
-    refresh_count: u32,
-    count: u32,
+    // refresh_count: u32,
+    // count: u32,
 }
 
 impl Interner {
-    pub fn new(refresh_count: u32) -> Self {
+    pub fn new() -> Self {
         Self {
             map: FxHashMap::with_capacity_and_hasher(64 * 64, Default::default()),
-            refresh_count,
-            count: 0,
+            // refresh_count,
+            // count: 0,
         }
     }
 
     pub fn intern_tree(&mut self, tree: SV64Tree) -> SV64Tree {
-        self.count += 1;
-        self.maybe_prune();
+        // self.count += 1;
+        // self.maybe_prune();
 
         let l0 = &tree.root;
         let new_l0 = match &l0.node {
@@ -696,15 +696,62 @@ impl Interner {
         }
     }
 
-    fn maybe_prune(&mut self) {
-        if self.count < self.refresh_count {
-            return;
+    pub fn remove(&mut self, tree: SV64Tree) {
+        if let Some(root) = Arc::into_inner(tree.root) {
+            self.map.remove(&root.hash);
+
+            match root.node {
+                NodeKind::Leaf(_) => unreachable!("{L0_NO_LEAF}"),
+                NodeKind::Uniform(_) => {}
+                NodeKind::Branch(l0_branch) => {
+                    for l1 in l0_branch.children {
+                        if let Some(l1) = Arc::into_inner(l1) {
+                            self.map.remove(&l1.hash);
+
+                            match l1.node {
+                                NodeKind::Leaf(_) => unreachable!("{L1_NO_LEAF}"),
+                                NodeKind::Uniform(_) => {}
+                                NodeKind::Branch(l1_branch) => {
+                                    for l2 in l1_branch.children {
+                                        if let Some(l2) = Arc::into_inner(l2) {
+                                            self.map.remove(&l2.hash);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-
-        self.map.retain(|_k, v| v.upgrade().is_some());
-
-        self.count = 0;
+        // match &tree.root.node {
+        //     NodeKind::Branch(b) => {
+        //         for child in &b.children {
+        //             match &child.node {
+        //                 NodeKind::Branch(b) => {
+        //                     for child in &b.children {
+        //                         if let Some(n) = Arc::into_inner(child.into()) {}
+        //                     }
+        //                 }
+        //                 NodeKind::Leaf(l) => todo!(),
+        //                 NodeKind::Uniform(u) => todo!(),
+        //             }
+        //         }
+        //     }
+        //     NodeKind::Leaf(l) => todo!(),
+        //     NodeKind::Uniform(u) => todo!(),
+        // }
     }
+
+    // fn maybe_prune(&mut self) {
+    //     if self.count < self.refresh_count {
+    //         return;
+    //     }
+
+    //     self.map.retain(|_k, v| v.upgrade().is_some());
+
+    //     self.count = 0;
+    // }
 }
 
 #[inline(always)]
@@ -1032,7 +1079,7 @@ mod tests {
 
         let mut chunk = Chunk::new();
         chunk.set_voxel(IVec3::ZERO, grass_voxel);
-        let mut interner = Interner::new(10000);
+        let mut interner = Interner::new();
         let sv64t_1 = interner.intern_tree(SV64Tree::from_chunk(&chunk));
         let sv64t_2 = interner.intern_tree(SV64Tree::from_chunk(&chunk));
 

@@ -13,9 +13,7 @@ use crate::{
 };
 
 pub struct ChunkStore {
-    // db: sled::Db,
     deltas_tree: sled::Tree,
-    // chunk_tree: sled::Tree,
     bincode_config: bincode::config::Configuration<BigEndian>,
 }
 
@@ -24,22 +22,22 @@ impl ChunkStore {
         let path = "./debug_saves";
         std::fs::create_dir_all(path).expect("Failed to create debug save directory");
 
-        let db = sled::open(path).expect("Failed to open sled db");
+        let db = sled::Config::default()
+            .cache_capacity(1024 * 1024 * 256)
+            .path(path)
+            .open()
+            .expect("Failed to create 'deltas' tree");
         let deltas_tree = db
             .open_tree("deltas")
             .expect("Failed to create 'deltas' tree");
-        // let chunk_tree = db
-        //     .open_tree("chunk")
-        //     .expect("Failed to create 'chunk' tree");
 
         ChunkStore {
-            // db,
             deltas_tree,
-            // chunk_tree,
             bincode_config: bincode::config::standard().with_big_endian(),
         }
     }
 
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     pub fn save_chunks(&self, mut chunks_arr: Vec<(ChunkKey, Deltas)>, lod_config: &LODConfig) {
         let mut batch = sled::Batch::default();
         let mut current_lod = 0;

@@ -33,7 +33,7 @@ impl Default for ChunkMeshGroup {
 
 #[derive(Debug)]
 pub struct ChunkMeshData {
-    pub indices: Vec<u32>,
+    pub indices: Vec<i32>,
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
@@ -299,7 +299,7 @@ fn process_quad<V: ChunkeeVoxel>(
     effective_voxel_size: f32,
 ) {
     let start_vertex = mesh_data.positions.len() as u32;
-    let mut new_indices = face.quad_mesh_indices(start_vertex);
+    let mut new_indices = face.quad_mesh_indices(start_vertex).map(|i| i as i32);
     new_indices.swap(1, 2);
     new_indices.swap(4, 5);
 

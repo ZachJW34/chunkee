@@ -103,7 +103,7 @@ impl WorldChunk {
         self.tree = Default::default();
         self.is_dirty = false;
         self.state = ChunkState::Loading;
-        self.deltas = Deltas::default();
+        self.deltas.0.clear();
         self.physics_state = PhysicsState::None;
         self.version = 0;
     }
@@ -204,10 +204,15 @@ impl<T> Ord for WorkerJob<T> {
     }
 }
 
+enum InternJob {
+    Add(ChunkKey, ChunkVersion, SV64Tree),
+    Remove(SV64Tree),
+}
+
 struct Queues {
     load: SegQueue<LoadJob>,
     mesh: SegQueue<MeshJob>,
-    intern: SegQueue<(ChunkKey, ChunkVersion, SV64Tree)>,
+    intern: SegQueue<InternJob>,
     edits: SegQueue<MeshJob>,
     physics: SegQueue<PhysicsJob>,
     saves: SegQueue<SaveJob>,
@@ -310,6 +315,7 @@ pub struct ChunkeeManager<V: 'static + ChunkeeVoxel> {
     clipmap: ClipMap,
     active: Arc<AtomicBool>,
     config: Arc<ChunkeeConfig>,
+    // TODO: Either stick with just hashmap or use proper Memory pull
     chunk_manager: ChunkManager,
     camera: Option<CameraData>,
     chunk_store: Arc<ChunkStore>,
@@ -345,7 +351,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
             result_tx,
             result_rx,
             physics_manager: PhysicsManager::new(),
-            interner: Arc::new(Mutex::new(Interner::new(num_chunks))),
+            interner: Arc::new(Mutex::new(Interner::new())),
             last_camera_wv: None,
             pending_unloads: Default::default(),
             pending_saves: Default::default(),
@@ -445,7 +451,9 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
             self.update_clipmap(&camera);
         }
         self.handle_physics(physics_entities, &camera);
-        self.process_edits(edits);
+        if !edits.is_empty() {
+            self.process_edits(edits);
+        }
         self.process_worker_results();
         // TODO: Need to do this every tick?
         self.reap_obsolete_chunks();
@@ -462,10 +470,10 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
             self.job_queue.queues.print();
             self.job_queue.cvar.notify_all();
         }
-
         self.save_edits();
     }
 
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn process_edits(&mut self, edits: &[(IVec3, V)]) {
         let mut voxel_edits: FxHashMap<ChunkKey, Vec<(IVec3, VoxelId)>> =
             FxHashMap::with_hasher(Default::default());
@@ -517,7 +525,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
 
                 chunks_to_mesh.insert(*key, true);
 
-                self.job_queue.queues.intern.push((
+                self.job_queue.queues.intern.push(InternJob::Add(
                     world_chunk.key,
                     world_chunk.version,
                     world_chunk.tree.clone(),
@@ -597,6 +605,11 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                             self.updates.push(Update::MeshUnload(key));
                         }
                     }
+
+                    self.job_queue
+                        .queues
+                        .intern
+                        .push(InternJob::Remove(std::mem::take(&mut world_chunk.tree)));
                 });
             }
         }
@@ -627,7 +640,7 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
                         world_chunk.tree = tree;
                         world_chunk.deltas = deltas;
 
-                        self.job_queue.queues.intern.push((
+                        self.job_queue.queues.intern.push(InternJob::Add(
                             world_chunk.key,
                             world_chunk.version,
                             world_chunk.tree.clone(),
@@ -706,21 +719,26 @@ impl<V: 'static + ChunkeeVoxel> ChunkeeManager<V> {
 
         if now.duration_since(self.last_save).as_secs() > 5 {
             self.last_save = now;
-            let mut chunks_to_persist = vec![];
+            self.save_edits_internal();
+        }
+    }
 
-            for key in self.pending_saves.drain() {
-                if let Some(world_chunk) = self.chunk_manager.map.get_mut(&key) {
-                    if world_chunk.key.lod == 0 && world_chunk.is_dirty {
-                        chunks_to_persist.push((key, world_chunk.deltas.clone()));
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
+    fn save_edits_internal(&mut self) {
+        let mut chunks_to_persist = vec![];
 
-                        world_chunk.is_dirty = false;
-                    }
+        for key in self.pending_saves.drain() {
+            if let Some(world_chunk) = self.chunk_manager.map.get_mut(&key) {
+                if world_chunk.key.lod == 0 && world_chunk.is_dirty {
+                    chunks_to_persist.push((key, world_chunk.deltas.clone()));
+
+                    world_chunk.is_dirty = false;
                 }
             }
+        }
 
-            if !chunks_to_persist.is_empty() {
-                self.job_queue.queues.saves.push(chunks_to_persist);
-            }
+        if !chunks_to_persist.is_empty() {
+            self.job_queue.queues.saves.push(chunks_to_persist);
         }
     }
 
@@ -831,7 +849,6 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
             }
 
             if let Some(job) = job_queue.queues.load.pop() {
-                // TODO: Don't need to create 32x32x32 chunk if uniform
                 let (chunk, deltas) =
                     load_chunk(job.key, &chunk_store, &config.generator, config.voxel_size);
                 let tree = SV64Tree::from_chunk(&chunk);
@@ -853,11 +870,18 @@ fn worker_loop<V: 'static + ChunkeeVoxel>(
 
             if !job_queue.queues.intern.is_empty() {
                 if let Some(mut interner) = interner.try_lock() {
-                    while let Some((cv, version, tree)) = job_queue.queues.intern.pop() {
-                        let interned = interner.intern_tree(tree);
-                        result_tx
-                            .send(WorkerResult::Intern(cv, version, interned))
-                            .ok();
+                    while let Some(task) = job_queue.queues.intern.pop() {
+                        match task {
+                            InternJob::Add(key, version, tree) => {
+                                let interned = interner.intern_tree(tree);
+                                result_tx
+                                    .send(WorkerResult::Intern(key, version, interned))
+                                    .ok();
+                            }
+                            InternJob::Remove(tree) => {
+                                interner.remove(tree);
+                            }
+                        }
                     }
 
                     continue;

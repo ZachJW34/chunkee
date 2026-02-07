@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 use crate::voxels::MyVoxels;
 use chunkee_core::{
@@ -9,7 +9,10 @@ use chunkee_core::{
     glam::{IVec2, IVec3},
 };
 use dashmap::DashMap;
+
+use lru::LruCache;
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
+use parking_lot::Mutex;
 
 const SEA_LEVEL: f32 = 4.0;
 const BEACH_HEIGHT: f32 = 2.0;
@@ -24,8 +27,8 @@ pub struct WorldGenerator {
     terrain_noise: Fbm<Perlin>,
     cave_noise_1: Fbm<Perlin>,
     cave_noise_2: Fbm<Perlin>,
-    // TODO: cache management, currently can grow forever. LRU?
-    data_cache: DashMap<(IVec2, u8), Arc<ChunkColumnData>>,
+    // TODO: Better concurrent LRU?
+    data_cache: Mutex<LruCache<(IVec2, u8), Arc<ChunkColumnData>>>,
     biome_noise: Fbm<Perlin>,
 }
 
@@ -50,7 +53,7 @@ impl WorldGenerator {
             cave_noise_1,
             cave_noise_2,
             biome_noise,
-            data_cache: DashMap::new(),
+            data_cache: Mutex::new(LruCache::new(NonZeroUsize::new(1000).unwrap())),
         }
     }
     fn get_or_compute_column_data(
@@ -59,10 +62,13 @@ impl WorldGenerator {
         voxel_size: f32,
     ) -> Arc<ChunkColumnData> {
         const STRIDE: i32 = CHUNK_SIZE;
+        let mut data_cache = self.data_cache.lock();
         let column_cv = (IVec2::new(chunk_key.v.x, chunk_key.v.z), chunk_key.lod);
-        if let Some(data) = self.data_cache.get(&column_cv) {
+        if let Some(data) = data_cache.get(&column_cv) {
             return data.clone();
         }
+
+        drop(data_cache);
 
         let mut height_map = [0.0; (CHUNK_SIZE * CHUNK_SIZE) as usize];
         let mut biome_jitter_map = [0.0; (CHUNK_SIZE * CHUNK_SIZE) as usize];
@@ -97,7 +103,9 @@ impl WorldGenerator {
             height_map,
             biome_jitter_map,
         });
-        self.data_cache.insert(column_cv, data.clone());
+        let mut data_cache = self.data_cache.lock();
+        data_cache.push(column_cv, data.clone());
+
         data
     }
 }

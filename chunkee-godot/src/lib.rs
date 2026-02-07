@@ -79,10 +79,10 @@ const VOXEL_ARRAY_FORMAT: LazyCell<ArrayFormat> = LazyCell::new(|| {
 impl IStaticBody3D for ChunkeeWorldNode {
     fn init(base: Base<StaticBody3D>) -> Self {
         println!("Initializing ChunkeeWorldNode");
-        let voxel_size = 0.25;
+        let voxel_size = 1.0;
         let lod_config = LODConfig {
             max_lod: 3,
-            draw_distances: vec![8, 8, 8, 8],
+            draw_distances: vec![12, 12, 12, 12],
             hysteresis: 0.6,
         };
         lod_config.validate();
@@ -248,7 +248,7 @@ impl ChunkeeWorldNode {
 
         let mut rs = RenderingServer::singleton();
 
-        while let Some(update) = self.chunkee_manager.updates.pop() {
+        for update in std::mem::take(&mut self.chunkee_manager.updates) {
             match update {
                 Update::Mesh(cv, chunk_mesh_group) => self.render_mesh_group(
                     &mut rs,
@@ -307,6 +307,7 @@ impl ChunkeeWorldNode {
         }
     }
 
+    #[cfg_attr(feature = "profile", tracing::instrument(skip_all))]
     fn render_physics_mesh(&mut self, chunk_key: ChunkKey, pmesh: PhysicsMesh) {
         self.remove_physics_mesh(chunk_key);
 
@@ -478,15 +479,27 @@ fn create_render_instance(
     mesh_data: ChunkMeshData,
     material: &Gd<ShaderMaterial>,
 ) -> (Rid, Rid) {
-    let indices = PackedInt32Array::from_iter(mesh_data.indices.iter().map(|i| *i as i32));
-    let positions =
-        PackedVector3Array::from_iter(mesh_data.positions.iter().map(|p| Vector3::from_array(*p)));
-    let normals =
-        PackedVector3Array::from_iter(mesh_data.normals.iter().map(|n| Vector3::from_array(*n)));
-    let tangents = PackedFloat32Array::from(mesh_data.tangents.as_slice());
-    let uvs =
-        PackedVector2Array::from_iter(mesh_data.uvs.iter().map(|uv| Vector2::from_array(*uv)));
-    let layers = PackedFloat32Array::from(mesh_data.layers.as_slice());
+    let indices = PackedInt32Array::from(bytemuck::cast_slice(&mesh_data.indices));
+    let positions = PackedVector3Array::from(unsafe {
+        std::slice::from_raw_parts(
+            mesh_data.positions.as_ptr() as *const Vector3,
+            mesh_data.positions.len(),
+        )
+    });
+    let normals = PackedVector3Array::from(unsafe {
+        std::slice::from_raw_parts(
+            mesh_data.normals.as_ptr() as *const Vector3,
+            mesh_data.normals.len(),
+        )
+    });
+    let uvs = PackedVector2Array::from(unsafe {
+        std::slice::from_raw_parts(
+            mesh_data.uvs.as_ptr() as *const Vector2,
+            mesh_data.uvs.len(),
+        )
+    });
+    let tangents = PackedFloat32Array::from(bytemuck::cast_slice(&mesh_data.tangents));
+    let layers = PackedFloat32Array::from(bytemuck::cast_slice(&mesh_data.layers));
 
     let mut arrays = VarArray::new();
     arrays.resize(ARRAY_MAX, &Variant::nil());
